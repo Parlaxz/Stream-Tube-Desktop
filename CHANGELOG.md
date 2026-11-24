@@ -13,12 +13,22 @@
 - **Default speed** box: sets the speed videos start at and what the `G` shortcut applies.
 - Speed control in the playback bar: current speed between `−` and `+` buttons, placed left of the subtitles button behind a vertical divider. The `−`/`+` buttons use the configured step amounts, and clicking the speed opens the speed menu.
 - Each shortcut press shows the same speed popup as before.
+- **Read ahead** card: choose the forward and back video buffer sizes in MiB. Each open video tab keeps its own buffer in RAM.
 
 ### Tabs & Navigation
 
 - **Middle-click** a video or short — on home, subscriptions, search results, or the related/queue list — to open it in a new background tab, same as **Ctrl/Cmd+click**.
 - **Ctrl/Cmd+click** or **middle-click** any sidebar item (Home, Shorts, Subscriptions, History, Playlists, Watch later, Downloads, channels, Explore, Settings) to open it in a new tab. New sidebar items get this automatically.
 - Right-click a video thumbnail opens **Save to playlist**; middle-click now opens the video in a new tab instead of opening that dialog.
+- Each tab now has its own player. Switching away from a video tab pauses it but keeps its engine, demuxer cache and exact position in RAM; switching back resumes it without downloading the loaded part again. Closing a tab frees its buffer.
+- Opening a video in a background tab loads nothing until the tab is clicked. The tab shows the card title and channel icon only.
+- Tabs persist across a full restart: routes, titles, channel icons and the active tab are restored. Video buffers cannot survive a process restart.
+- The tab bar has a grid button, and **left+right click anywhere** opens the same tab overview. The grid fills 90% of the window in both directions and is scrollable.
+- The grid shows video thumbnails (icons for other pages), with the channel avatar under each video thumbnail. Click a tile to switch to that tab.
+- Hovering a video tab in the tab bar shows its thumbnail.
+- The grid uses **6 columns** by default. The **Dynamic** toggle switches to a square-ish layout (`rows = floor(sqrt(n))`, `columns = ceil(n / rows)`). The choice is remembered.
+- The 12-tab limit is removed.
+
 
 ### Home Page preservation
 

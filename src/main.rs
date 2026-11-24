@@ -63,6 +63,7 @@ fn save_state(cx: &mut App) {
         let _ = main.update(cx, |_, window, _| save_window_bounds(window));
     }
     player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
+    ui::app::save_tabs_now(cx);
 }
 
 fn main() {

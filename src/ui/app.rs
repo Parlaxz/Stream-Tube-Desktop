@@ -8,10 +8,11 @@ use crate::player::view::PlayerView;
 use crate::store;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::ClickEvent;
+use serde::{Deserialize, Serialize};
 
 // ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ routes ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Route {
     Home,
     Shorts(Option<String>),
@@ -136,7 +137,7 @@ pub fn navigate(route: Route, window: &mut Window, cx: &mut App) {
 pub fn navigate_titled(route: Route, title: Option<String>, window: &mut Window, cx: &mut App) {
     // Ctrl+click (Cmd+click) on any card or link opens it in a new tab, like a browser
     if window.modifiers().secondary(cx) {
-        open_in_new_tab(route, title, false, window, cx);
+        open_in_new_tab(route, title, None, false, window, cx);
         return;
     }
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
@@ -145,17 +146,17 @@ pub fn navigate_titled(route: Route, title: Option<String>, window: &mut Window,
 }
 
 /// Opens a page in a new tab, in the background unless `switch` is set.
-pub fn open_in_new_tab(route: Route, title: Option<String>, switch: bool, window: &mut Window, cx: &mut App) {
+pub fn open_in_new_tab(route: Route, title: Option<String>, channel: Option<String>, switch: bool, window: &mut Window, cx: &mut App) {
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
-        app.update(cx, |a, cx| a.new_tab(route, title, switch, window, cx));
+        app.update(cx, |a, cx| a.new_tab(route, title, channel, switch, window, cx));
     }
 }
 
 /// Ctrl/Cmd+left click or a middle click opens `route` in a new tab; a plain
 /// left click navigates in place. Both gestures call this so they behave the same.
-pub fn activate(route: Route, title: Option<String>, ev: &ClickEvent, window: &mut Window, cx: &mut App) {
+pub fn activate(route: Route, title: Option<String>, channel: Option<String>, ev: &ClickEvent, window: &mut Window, cx: &mut App) {
     if ev.is_middle_click() || (ev.standard_click() && ev.modifiers().secondary(cx)) {
-        open_in_new_tab(route, title, false, window, cx);
+        open_in_new_tab(route, title, channel, false, window, cx);
     } else if ev.standard_click() {
         navigate_titled(route, title, window, cx);
     }
@@ -450,6 +451,8 @@ struct Tab {
     /// Title from the card this tab was opened from, so a background tab can
     /// show it without building a page or fetching anything.
     title: Option<String>,
+    /// Channel avatar from the card, for the tab grid.
+    channel: Option<String>,
     /// built the first time the tab is shown, so a video opened in the
     /// background doesn't start playing on its own
     page: Option<AnyView>,
@@ -458,6 +461,32 @@ struct Tab {
     /// Each tab owns its player and mpv engine, so parked tabs keep their
     /// loaded video data (and exact position) in memory.
     player: Entity<Player>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedTab {
+    route: Route,
+    title: Option<String>,
+    channel: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedTabs {
+    tabs: Vec<SavedTab>,
+    active: usize,
+}
+
+fn load_saved_tabs() -> Option<SavedTabs> {
+    let raw = store::kv_get("tabs_state")?;
+    let saved: SavedTabs = serde_json::from_str(&raw).ok()?;
+    (!saved.tabs.is_empty()).then_some(saved)
+}
+
+/// Saves the tab list now (also called from the tray's Exit/Restart path).
+pub fn save_tabs_now(cx: &mut App) {
+    if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+        app.update(cx, |a, cx| a.save_tabs(cx));
+    }
 }
 
 pub struct AppView {
@@ -514,6 +543,8 @@ pub struct AppView {
     right_down: bool,
     /// the tab overview grid is open
     tab_grid_open: bool,
+    /// use sqrt-based column count instead of the default 6
+    tab_grid_dynamic: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -571,7 +602,67 @@ impl AppView {
                 cx.notify();
             }
         }));
-        let p = player(cx);
+        // a YouTube link passed on the command line opens directly, instead of restoring tabs
+        let arg_route = route_from_link(&std::env::args().nth(1).unwrap_or_default());
+        let mut restored = None;
+        if arg_route.is_none() {
+            if let Some(saved) = load_saved_tabs() {
+                let mut tabs = Vec::new();
+                let mut active = usize::MAX;
+                let mut id = 1u64;
+                for (i, st) in saved.tabs.into_iter().enumerate() {
+                    if matches!(&st.route, Route::Channel(x) | Route::Playlist(x) | Route::Watch { id: x, .. } if x.is_empty()) {
+                        continue;
+                    }
+                    let player = crate::player::controller::create(cx);
+                    if i == saved.active {
+                        active = tabs.len();
+                    }
+                    tabs.push(Tab {
+                        id,
+                        route: st.route,
+                        title: st.title,
+                        channel: st.channel,
+                        page: None,
+                        history: Vec::new(),
+                        forward: Vec::new(),
+                        player,
+                    });
+                    id += 1;
+                }
+                if !tabs.is_empty() {
+                    let active = if active == usize::MAX { 0 } else { active.min(tabs.len() - 1) };
+                    let route = tabs[active].route.clone();
+                    let p = tabs[active].player.clone();
+                    restored = Some((tabs, active, id, route, p));
+                }
+            }
+        }
+        let (tabs, active_tab, next_tab_id, start, p) = restored.unwrap_or_else(|| {
+            let p = player(cx);
+            let start = arg_route.unwrap_or_else(|| match store::settings_snapshot().start_page.as_str() {
+                "subscriptions" => Route::Subscriptions(None),
+                "history" => Route::History,
+                _ => Route::Home,
+            });
+            (
+                vec![Tab {
+                    id: 1,
+                    route: start.clone(),
+                    title: None,
+                    channel: None,
+                    page: None,
+                    history: Vec::new(),
+                    forward: Vec::new(),
+                    player: p.clone(),
+                }],
+                0,
+                2,
+                start,
+                p,
+            )
+        });
+        crate::player::controller::set_active(p.clone(), cx);
         // Only re-render the shell when the mini player appears/disappears; the
         // player views re-render themselves for every frame.
         let player_sub = cx.observe(&p, |this: &mut Self, p, cx| {
@@ -627,8 +718,9 @@ impl AppView {
                 apply_theme(Some(window), cx);
             }
         }));
-        window.on_window_should_close(cx, |window, _| {
+        window.on_window_should_close(cx, |window, cx| {
             crate::save_window_bounds(window);
+            save_tabs_now(cx);
             // X hides to the tray; only the tray's Exit really closes the app
             !crate::tray::hide_to_tray(window)
         });
@@ -639,13 +731,6 @@ impl AppView {
         // re-render (to add or drop the preview layer) only when a preview starts or ends
         subs.push(cx.subscribe(&crate::player::preview::preview(cx), |_, _, _: &crate::player::preview::PreviewEvent, cx| cx.notify()));
         cx.set_global(crate::ui::slot::PlayerSlot::default());
-        // a YouTube link passed on the command line opens directly
-        let arg_route = route_from_link(&std::env::args().nth(1).unwrap_or_default());
-        let start = arg_route.unwrap_or_else(|| match store::settings_snapshot().start_page.as_str() {
-            "subscriptions" => Route::Subscriptions(None),
-            "history" => Route::History,
-            _ => Route::Home,
-        });
         crate::perf::mark("app shell");
         let page = build_page(&start, window, cx);
         crate::perf::mark("start page");
@@ -674,17 +759,9 @@ impl AppView {
             }
         }
         Self {
-            tabs: vec![Tab {
-                id: 1,
-                route: start.clone(),
-                title: None,
-                page: None,
-                history: Vec::new(),
-                forward: Vec::new(),
-                player: p.clone(),
-            }],
-            active_tab: 0,
-            next_tab_id: 2,
+            tabs,
+            active_tab,
+            next_tab_id,
             route: start,
             page,
             history: Vec::new(),
@@ -721,6 +798,7 @@ impl AppView {
             left_down: false,
             right_down: false,
             tab_grid_open: false,
+            tab_grid_dynamic: store::kv_get("tab_grid_dynamic").as_deref() == Some("1"),
             _subs: subs,
         }
     }
@@ -1169,6 +1247,7 @@ impl AppView {
         self.forward.clear();
         window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
         window.focus(&self.focus, cx);
+        self.save_tabs(cx);
         cx.notify();
     }
 
@@ -1176,7 +1255,7 @@ impl AppView {
     /// target in a new tab, any other click navigates in place.
     fn nav(&mut self, route: Route, ev: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         if ev.is_middle_click() || (ev.standard_click() && ev.modifiers().secondary(cx)) {
-            self.new_tab(route, None, false, window, cx);
+            self.new_tab(route, None, None, false, window, cx);
         } else if ev.standard_click() {
             self.go(route, window, cx);
         }
@@ -1184,7 +1263,7 @@ impl AppView {
 
     // ΓöÇΓöÇΓöÇΓöÇΓöÇ tabs ΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-    pub fn new_tab(&mut self, route: Route, title: Option<String>, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn new_tab(&mut self, route: Route, title: Option<String>, channel: Option<String>, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
         match &route {
             Route::Channel(id) | Route::Playlist(id) | Route::Watch { id, .. } if id.is_empty() => return,
             _ => {}
@@ -1195,11 +1274,12 @@ impl AppView {
         let player = crate::player::controller::create(cx);
         // right after the current tab, like a browser
         let at = self.active_tab + 1;
-        self.tabs.insert(at, Tab { id, route, title, page: None, history: Vec::new(), forward: Vec::new(), player });
+        self.tabs.insert(at, Tab { id, route, title, channel, page: None, history: Vec::new(), forward: Vec::new(), player });
         if switch {
             self.switch_tab(at, window, cx);
         } else {
             toast(cx, "Opened in a new tab");
+            self.save_tabs(cx);
             cx.notify();
         }
     }
@@ -1245,6 +1325,7 @@ impl AppView {
         crate::ui::pip::follow(pl, cx);
         window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
         window.focus(&self.focus, cx);
+        self.save_tabs(cx);
         cx.notify();
     }
 
@@ -1273,6 +1354,7 @@ impl AppView {
         if index < self.active_tab {
             self.active_tab -= 1;
         }
+        self.save_tabs(cx);
         cx.notify();
     }
 
@@ -1285,13 +1367,13 @@ impl AppView {
     }
 
     /// A short name for a tab's page.
-    fn tab_label(route: &Route, title: Option<&str>, cx: &App) -> String {
+    fn tab_label(route: &Route, title: Option<&str>, player: &Entity<Player>, cx: &App) -> String {
         if let Some(t) = title.filter(|t| !t.is_empty()) {
             return t.to_string();
         }
         match route {
             Route::Watch { id, .. } => {
-                let p = player(cx).read(cx);
+                let p = player.read(cx);
                 p.video.as_ref().filter(|v| &v.id == id && !v.title.is_empty()).map(|v| v.title.clone()).unwrap_or_else(|| "Video".into())
             }
             Route::Channel(id) => store::subscriptions().into_iter().find(|s| &s.channel_id == id).map(|s| s.name).unwrap_or_else(|| "Channel".into()),
@@ -1331,67 +1413,98 @@ impl AppView {
             let active = i == self.active_tab;
             let route = if active { self.route.clone() } else { self.tabs[i].route.clone() };
             let id = self.tabs[i].id;
-            let label = Self::tab_label(&route, if active { None } else { self.tabs[i].title.as_deref() }, cx);
-            tabs = tabs.child(
-                div()
-                    .id(("tab", id))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .h(px(30.))
-                    .pl_3()
-                    .pr_1()
-                    .w(px(200.))
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .when(active, |d| d.bg(p.surface2))
-                    .when(!active, |d| d.hover(|d| d.bg(p.hover)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+            let label = Self::tab_label(&route, if active { None } else { self.tabs[i].title.as_deref() }, &self.tabs[i].player, cx);
+            let thumb = {
+                let video = self.tabs[i].player.read(cx).video.clone();
+                let thumb_of = |id: &str| {
+                    video
+                        .as_ref()
+                        .filter(|v| v.id == id && !v.thumbnail.is_empty())
+                        .map(|v| v.thumbnail.clone())
+                        .unwrap_or_else(|| innertube::default_thumb(id))
+                };
+                match &route {
+                    Route::Watch { id, .. } => Some(thumb_of(id)),
+                    Route::Shorts(Some(id)) => Some(thumb_of(id)),
+                    _ => None,
+                }
+            };
+            let mut tab = div()
+                .id(("tab", id))
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .h(px(30.))
+                .pl_3()
+                .pr_1()
+                .w(px(200.))
+                .rounded_lg()
+                .cursor_pointer()
+                .when(active, |d| d.bg(p.surface2))
+                .when(!active, |d| d.hover(|d| d.bg(p.hover)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
+                        this.switch_tab(i, window, cx);
+                    }
+                }))
+                // middle click closes, like a browser tab
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
                         if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
-                            this.switch_tab(i, window, cx);
+                            this.close_tab(i, window, cx);
                         }
-                    }))
-                    // middle click closes, like a browser tab
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _, window, cx| {
+                    }),
+                )
+                .child(icon(Self::tab_icon(&route)).size_4().text_color(if active { p.accent } else { p.text2 }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_sm()
+                        .text_color(if active { p.text } else { p.text2 })
+                        .child(label.clone()),
+                )
+                .child(
+                    div()
+                        .id(("tab-close", id))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(22.))
+                        .rounded_md()
+                        .hover(|d| d.bg(p.hover))
+                        .child(icon("x").size_3p5().text_color(p.text2))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
                             if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
                                 this.close_tab(i, window, cx);
                             }
-                        }),
-                    )
-                    .child(icon(Self::tab_icon(&route)).size_4().text_color(if active { p.accent } else { p.text2 }))
-                    .child(
+                        })),
+                );
+            if let Some(thumb) = thumb {
+                let tip_title = label;
+                tab = tab.tooltip(move |window, cx| {
+                    let thumb = thumb.clone();
+                    let tip_title = tip_title.clone();
+                    gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_sm()
-                            .text_color(if active { p.text } else { p.text2 })
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .id(("tab-close", id))
                             .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .size(px(22.))
-                            .rounded_md()
-                            .hover(|d| d.bg(p.hover))
-                            .child(icon("x").size_3p5().text_color(p.text2))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
-                                    this.close_tab(i, window, cx);
-                                }
-                            })),
-                    ),
-            );
+                            .flex_col()
+                            .gap_1()
+                            .w(px(240.))
+                            .child(img(thumb.clone()).w_full().h(px(135.)).rounded_md().object_fit(ObjectFit::Cover))
+                            .child(div().text_sm().child(tip_title.clone()))
+                    })
+                    .build(window, cx)
+                });
+            }
+            tabs = tabs.child(tab);
         }
         let plus = div()
             .id("tab-new")
@@ -1404,7 +1517,7 @@ impl AppView {
             .cursor_pointer()
             .hover(|d| d.bg(p.hover))
             .child(icon("plus").size_4().text_color(p.text2))
-            .on_click(cx.listener(|this, _, window, cx| this.new_tab(Route::Home, None, true, window, cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.new_tab(Route::Home, None, None, true, window, cx)));
         let grid = div()
             .id("tab-grid")
             .flex()
@@ -1439,6 +1552,29 @@ impl AppView {
         )
     }
 
+    /// Persists the tab list so it survives a full restart.
+    fn save_tabs(&self, cx: &App) {
+        let mut tabs = Vec::with_capacity(self.tabs.len());
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let active = i == self.active_tab;
+            let route = if active { self.route.clone() } else { tab.route.clone() };
+            let title = Some(Self::tab_label(&route, if active { None } else { tab.title.as_deref() }, &tab.player, cx));
+            let channel = tab.channel.clone().or_else(|| {
+                let video = tab.player.read(cx).video.clone()?;
+                match &route {
+                    Route::Watch { id, .. } if &video.id == id => video.channel_avatar.clone(),
+                    Route::Shorts(Some(id)) if &video.id == id => video.channel_avatar.clone(),
+                    _ => None,
+                }
+            });
+            tabs.push(SavedTab { route, title, channel });
+        }
+        let state = SavedTabs { tabs, active: self.active_tab };
+        if let Ok(s) = serde_json::to_string(&state) {
+            store::kv_set("tabs_state", &s);
+        }
+    }
+
     /// Opens the tab grid on a left+right click chord.
     fn mouse_button(&mut self, left: bool, cx: &mut Context<Self>) {
         if left {
@@ -1461,28 +1597,41 @@ impl AppView {
         }
         let p = pal(cx);
         let n = self.tabs.len().max(1);
-        let rows = ((n as f64).sqrt().floor() as usize).max(1);
-        let cols = (n + rows - 1) / rows;
+        let cols = if self.tab_grid_dynamic {
+            let rows = ((n as f64).sqrt().floor() as usize).max(1);
+            (n + rows - 1) / rows
+        } else {
+            6
+        };
         let vp = cx.global::<UiState>().viewport;
-        let max_w = (f32::from(vp.width) * 0.85).clamp(340., 1600.);
+        // the modal is 90% of the window in both directions
+        let modal_w = (f32::from(vp.width) * 0.9).max(320.);
+        let modal_h = (f32::from(vp.height) * 0.9).max(240.);
         let gap = 12.0;
-        let item_w = ((max_w - 32.0 - gap * cols.saturating_sub(1) as f32) / cols as f32).clamp(72., 180.);
-        let panel_w = item_w * cols as f32 + gap * cols.saturating_sub(1) as f32 + 32.0;
+        let item_w = ((modal_w - 32.0 - gap * cols.saturating_sub(1) as f32) / cols as f32).max(48.);
         let item_h = item_w * 9.0 / 16.0;
-        let max_h = (f32::from(vp.height) * 0.8).max(240.);
 
         let mut grid = div().grid().grid_cols(cols.min(u16::MAX as usize) as u16).gap_3();
         for i in 0..self.tabs.len() {
             let tab = &self.tabs[i];
             let active = i == self.active_tab;
             let route = if active { self.route.clone() } else { tab.route.clone() };
-            let label = Self::tab_label(&route, if active { None } else { tab.title.as_deref() }, cx);
+            let label = Self::tab_label(&route, if active { None } else { tab.title.as_deref() }, &tab.player, cx);
             let icon_name = Self::tab_icon(&route);
             let thumb = match &route {
                 Route::Watch { id, .. } => Some(innertube::default_thumb(id)),
                 Route::Shorts(Some(id)) => Some(innertube::default_thumb(id)),
                 _ => None,
             };
+            let is_video = thumb.is_some();
+            let channel = tab.channel.clone().or_else(|| {
+                let video = tab.player.read(cx).video.clone()?;
+                match &route {
+                    Route::Watch { id, .. } if &video.id == id => video.channel_avatar.clone(),
+                    Route::Shorts(Some(id)) if &video.id == id => video.channel_avatar.clone(),
+                    _ => None,
+                }
+            });
             let id = tab.id;
             let picture = match thumb {
                 Some(t) => img(t).size_full().object_fit(ObjectFit::Cover).into_any_element(),
@@ -1494,6 +1643,21 @@ impl AppView {
                     .child(icon(icon_name).size_8().text_color(p.text2))
                     .into_any_element(),
             };
+            let mut heading = div().flex().items_center().gap_2().min_w_0();
+            if is_video {
+                if let Some(a) = &channel {
+                    heading = heading.child(avatar(Some(a.as_str()), px(22.), &label, cx));
+                }
+            }
+            heading = heading.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .line_clamp(2)
+                    .text_color(if active { p.text } else { p.text2 })
+                    .child(label),
+            );
             grid = grid.child(
                 div()
                     .id(("tg-item", id))
@@ -1520,7 +1684,7 @@ impl AppView {
                             .when(active, |d| d.border_2().border_color(p.accent))
                             .child(picture),
                     )
-                    .child(div().text_sm().line_clamp(2).text_color(if active { p.text } else { p.text2 }).child(label)),
+                    .child(heading),
             );
         }
 
@@ -1549,9 +1713,8 @@ impl AppView {
                                 div()
                                     .id("tg-panel")
                                     .occlude()
-                                    .w(px(panel_w))
-                                    .max_w(px(max_w))
-                                    .max_h(px(max_h))
+                                    .w(px(modal_w))
+                                    .h(px(modal_h))
                                     .flex()
                                     .flex_col()
                                     .gap_3()
@@ -1567,10 +1730,37 @@ impl AppView {
                                             .items_center()
                                             .justify_between()
                                             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(format!("Tabs ({n})")))
-                                            .child(icon_button("tg-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
-                                                this.tab_grid_open = false;
-                                                cx.notify();
-                                            }))),
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .id("tg-dynamic")
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .px_3()
+                                                            .h(px(28.))
+                                                            .rounded_full()
+                                                            .bg(if self.tab_grid_dynamic { p.accent } else { p.chip })
+                                                            .text_sm()
+                                                            .text_color(if self.tab_grid_dynamic { white() } else { p.text })
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                this.tab_grid_dynamic = !this.tab_grid_dynamic;
+                                                                store::kv_set("tab_grid_dynamic", if this.tab_grid_dynamic { "1" } else { "0" });
+                                                                cx.notify();
+                                                            }))
+                                                            .child(icon("layout-grid").size_4())
+                                                            .child(if self.tab_grid_dynamic { "Dynamic" } else { "6 columns" }),
+                                                    )
+                                                    .child(icon_button("tg-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
+                                                        this.tab_grid_open = false;
+                                                        cx.notify();
+                                                    }))),
+                                            ),
                                     )
                                     .child(div().id("tg-grid-wrap").flex_1().min_h_0().overflow_y_scroll().child(grid)),
                             ),
@@ -1593,6 +1783,7 @@ impl AppView {
                 }
             }
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
+            self.save_tabs(cx);
             cx.notify();
         }
     }
@@ -1603,6 +1794,7 @@ impl AppView {
             let cur_p = std::mem::replace(&mut self.page, p);
             self.history.push((cur_r, cur_p));
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
+            self.save_tabs(cx);
             cx.notify();
         }
     }
@@ -2030,7 +2222,7 @@ impl AppView {
         if m.control && !m.alt {
             match k {
                 "t" if !m.shift => {
-                    self.new_tab(Route::Home, None, true, window, cx);
+                    self.new_tab(Route::Home, None, None, true, window, cx);
                     return;
                 }
                 "w" if !m.shift && self.tabs.len() > 1 => {

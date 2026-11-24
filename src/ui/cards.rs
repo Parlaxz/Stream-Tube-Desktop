@@ -189,8 +189,9 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     {
         let route = if v.is_short { Route::Shorts(Some(v.id.clone())) } else { Route::Watch { id: v.id.clone(), playlist: None, start: None } };
         let title = v.title.clone();
+        let channel = v.channel_avatar.clone();
         items.push(MenuItem::new("app-window", "Open in new tab", move |window, cx| {
-            crate::ui::app::open_in_new_tab(route.clone(), Some(title.clone()), false, window, cx)
+            crate::ui::app::open_in_new_tab(route.clone(), Some(title.clone()), channel.clone(), false, window, cx)
         }));
     }
     let v1 = v.clone();
@@ -307,6 +308,8 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
     let route = watch_route(v);
     let route_aux = route.clone();
     let title_aux = tab_title.clone();
+    let channel = v.channel_avatar.clone();
+    let channel_aux = channel.clone();
     let channel_route = v.channel_id.clone().map(Route::Channel);
     let meta = meta_line(v);
     let show_avatar = show_channel && !store::settings_snapshot().hide_channel_avatars;
@@ -319,8 +322,8 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
         .gap_3()
         .cursor_pointer()
         .group("card")
-        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), ev, window, cx))
-        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), ev, window, cx))
+        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), channel.clone(), ev, window, cx))
+        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), channel_aux.clone(), ev, window, cx))
         .child(thumbnail(v, thumb, width, h, px(12.), cx))
         .child(
             div()
@@ -393,6 +396,8 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
         Route::Shorts(Some(id.clone()))
     };
     let route_aux = route.clone();
+    let channel = v.channel_avatar.clone();
+    let channel_aux = channel.clone();
     let h = width * (16. / 9.);
     div()
         .id(SharedString::from(format!("sc-{}", v.id)))
@@ -401,8 +406,8 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
         .w(width)
         .gap_2()
         .cursor_pointer()
-        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), ev, window, cx))
-        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), ev, window, cx))
+        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), channel.clone(), ev, window, cx))
+        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), channel_aux.clone(), ev, window, cx))
         .child(thumbnail(v, thumb, width, h, px(12.), cx))
         .child(
             div()
@@ -431,6 +436,8 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
     let route = watch_route(v);
     let route_aux = route.clone();
     let title_aux = tab_title.clone();
+    let channel = v.channel_avatar.clone();
+    let channel_aux = channel.clone();
     let channel_route = v.channel_id.clone().map(Route::Channel);
     let meta = meta_line(v);
     div()
@@ -440,8 +447,8 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
         .gap_4()
         .w_full()
         .cursor_pointer()
-        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), ev, window, cx))
-        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), ev, window, cx))
+        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), channel.clone(), ev, window, cx))
+        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), channel_aux.clone(), ev, window, cx))
         .child(thumbnail(v, thumb, thumb_w, thumb_w * (9. / 16.), px(12.), cx))
         .child(
             div()
@@ -495,6 +502,8 @@ pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut
     let route_aux = route.clone();
     let tab_title = title.clone();
     let title_aux = tab_title.clone();
+    let channel = v.channel_avatar.clone();
+    let channel_aux = channel.clone();
     div()
         .id(SharedString::from(format!("cr-{}", v.id)))
         .on_hover(prefetch_hover(&v.id))
@@ -508,9 +517,9 @@ pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut
         .hover(move |s| s.bg(p.surface))
         .on_click(move |ev, window, cx| match &on_click {
             Some(f) => f(window, cx),
-            None => activate(route.clone(), Some(tab_title.clone()), ev, window, cx),
+            None => activate(route.clone(), Some(tab_title.clone()), channel.clone(), ev, window, cx),
         })
-        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), ev, window, cx))
+        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), channel_aux.clone(), ev, window, cx))
         .child(thumbnail(v, thumb, px(168.), px(94.), px(8.), cx))
         .child(
             div()
