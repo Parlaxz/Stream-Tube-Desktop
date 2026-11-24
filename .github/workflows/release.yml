@@ -1,16 +1,14 @@
 name: Release
 
-# Builds every download in public on GitHub's runners, then puts them on a draft
-# release together with SHA256SUMS.txt and a signed build provenance attestation
-# for each file. Publishing the draft is left to a maintainer; once published,
-# immutable releases keep the files from being changed.
+# Windows-only. Start it by hand from the Actions tab on a version tag, or use
+# release.bat locally, which builds and publishes the release without CI.
 #
-# Start it by pushing a version tag (git tag v0.7.2-alpha && git push origin v0.7.2-alpha)
-# or from the Actions tab, choosing the tag under "Use workflow from".
+# It puts the downloads on a draft release together with SHA256SUMS.txt and a
+# signed build provenance attestation for each file. Publishing the draft is
+# left to a maintainer; once published, immutable releases keep the files from
+# being changed.
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
