@@ -81,6 +81,7 @@ impl SettingsPage {
             ("speed_down_key", s.speed_down_key.to_uppercase(), "S", |s, v| s.speed_down_key = v.trim().to_lowercase()),
             ("speed_down_step", format!("{}", s.speed_down_step), "0.25", |s, v| s.speed_down_step = v.parse().unwrap_or(0.25)),
             ("speed_reset_key", s.speed_reset_key.to_uppercase(), "R", |s, v| s.speed_reset_key = v.trim().to_lowercase()),
+            ("speed_default_key", s.speed_default_key.to_uppercase(), "G", |s, v| s.speed_default_key = v.trim().to_lowercase()),
             ("read_ahead", format!("{}", s.read_ahead_mb), "96", |s, v| s.read_ahead_mb = v.parse::<u32>().unwrap_or(96).min(4096)),
             ("read_ahead_back", format!("{}", s.read_ahead_back_mb), "24", |s, v| s.read_ahead_back_mb = v.parse::<u32>().unwrap_or(24).min(4096)),
             ("default_speed", format!("{}", s.default_speed), "1.0", |s, v| s.default_speed = v.parse::<f64>().unwrap_or(1.0).clamp(0.1, 5.0)),
@@ -557,7 +558,8 @@ impl SettingsPage {
                         key_step(&self.input("speed_down_key"), &self.input("speed_down_step"), cx),
                         cx,
                     ))
-                    .child(row("Reset speed", "Key to return to 1x", text_field(&self.input("speed_reset_key"), 72., cx), cx)),
+                    .child(row("Reset speed", "Key to return to 1x", text_field(&self.input("speed_reset_key"), 72., cx), cx))
+                    .child(row("Default speed shortcut", "Key to return to the default speed above", text_field(&self.input("speed_default_key"), 72., cx), cx)),
             )
             .child(
                 card(cx)

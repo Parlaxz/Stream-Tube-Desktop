@@ -2124,6 +2124,7 @@ impl AppView {
         let up_key = cs.speed_up_key.trim().to_lowercase();
         let down_key = cs.speed_down_key.trim().to_lowercase();
         let reset_key = cs.speed_reset_key.trim().to_lowercase();
+        let default_key = cs.speed_default_key.trim().to_lowercase();
         let up_step = cs.speed_up_step.max(0.01);
         let down_step = cs.speed_down_step.max(0.01);
         let default_speed = cs.default_speed;
@@ -2213,6 +2214,11 @@ impl AppView {
                     true
                 }
                 (kk, false) if !reset_key.is_empty() && kk.eq_ignore_ascii_case(&reset_key) => {
+                    pl.set_speed(1.0);
+                    crate::ui::toast(cx, format!("Speed {:.2}x", pl.speed));
+                    true
+                }
+                (kk, false) if !default_key.is_empty() && kk.eq_ignore_ascii_case(&default_key) => {
                     pl.set_speed(default_speed);
                     crate::ui::toast(cx, format!("Speed {:.2}x", pl.speed));
                     true

@@ -53,6 +53,7 @@ pub struct Settings {
     pub speed_down_key: String,
     pub speed_down_step: f64,
     pub speed_reset_key: String,
+    pub speed_default_key: String,
     // SponsorBlock / DeArrow / RYD
     pub sponsorblock: bool,
     pub sponsorblock_server: String,
@@ -186,6 +187,7 @@ impl Default for Settings {
             speed_down_key: "s".into(),
             speed_down_step: 0.25,
             speed_reset_key: "r".into(),
+            speed_default_key: "g".into(),
             sponsorblock: true,
             sponsorblock_server: "https://sponsor.ajay.app".into(),
             sb_actions: sb,
