@@ -562,21 +562,45 @@ pub fn my_playlists() -> Result<Vec<PlaylistItem>> {
     Ok(out)
 }
 
-/// Adds a video to one of the signed-in account's playlists.
-pub fn playlist_add(playlist_id: &str, video_id: &str) -> Result<()> {
-    let r = tv_call(
-        "browse/edit_playlist",
-        json!({
-            "playlistId": playlist_id,
-            "actions": [{ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }]
-        }),
-    )?;
+fn playlist_edit(playlist_id: &str, action: Value) -> Result<()> {
+    let r = tv_call("browse/edit_playlist", json!({ "playlistId": playlist_id, "actions": [action] }))?;
     if let Some(status) = r.get("status").and_then(Value::as_str)
         && !status.contains("SUCCEEDED")
     {
         return Err(anyhow!("{status}"));
     }
     Ok(())
+}
+
+/// Adds a video to one of the signed-in account's playlists.
+pub fn playlist_add(playlist_id: &str, video_id: &str) -> Result<()> {
+    playlist_edit(playlist_id, json!({ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }))
+}
+
+/// Removes a video from one of the signed-in account's playlists.
+pub fn playlist_remove(playlist_id: &str, video_id: &str) -> Result<()> {
+    playlist_edit(playlist_id, json!({ "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": video_id }))
+}
+
+/// Playlist ids that already contain `video_id`, from the account's add-to-playlist list.
+pub fn playlist_membership(video_id: &str) -> Result<std::collections::HashSet<String>> {
+    let r = tv_call(
+        "playlist/get_add_to_playlist",
+        json!({ "videoIds": [video_id], "excludeWatchLater": false }),
+    )?;
+    let mut options = Vec::new();
+    crate::api::json::find_all(&r, "playlistAddToOptionRenderer", &mut options);
+    let mut out = std::collections::HashSet::new();
+    for o in options {
+        let Some(id) = o.get("playlistId").and_then(Value::as_str) else { continue };
+        match o.get("containsSelectedVideos").and_then(Value::as_str) {
+            Some("NONE") | None => {}
+            Some(_) => {
+                out.insert(id.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// A playlist as the signed-in account sees it (works for private / unlisted ones).

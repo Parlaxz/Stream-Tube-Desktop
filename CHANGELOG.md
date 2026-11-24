@@ -47,4 +47,10 @@
 - The `⋮` menu on video cards and the watch page now has **Copy thumbnail**, below **Copy link**. It copies the thumbnail image itself to the clipboard.
 - Copied images also use the standard Windows `CF_DIB` format, so they paste into Explorer, Paint, .NET apps and clipboard history.
 
+### Playlists
 
+- Pin a YouTube playlist with the pin button on its card in **Playlists**; pinned playlists show in the sidebar.
+- The sidebar lists only pinned playlists. A **Show N more** row reveals the unpinned ones.
+- Hovering a video thumbnail shows **Watch later** and **Add to queue** buttons.
+- **Save to playlist** lists local and YouTube playlists with checkboxes. The checkboxes show which playlists already contain the video, and those playlists are listed first.
+- Left-click a playlist to save and close the dialog. Right-click its checkbox to toggle it without closing.

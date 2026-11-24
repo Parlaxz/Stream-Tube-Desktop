@@ -9,7 +9,7 @@ use crate::store;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::ClickEvent;
 
-// ───────────────────────── routes ─────────────────────────
+// ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ routes ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Route {
@@ -226,7 +226,7 @@ pub fn play_next(window: &mut Window, cx: &mut App) {
     }
 }
 
-// ───────────────────────── menus & dialogs ─────────────────────────
+// ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ menus & dialogs ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 #[derive(Clone)]
 pub struct MenuItem {
@@ -254,7 +254,11 @@ pub enum Dialog {
     SignIn,
     /// signing in to youtube.com in a browser, so watches reach the account
     WebSignIn,
-    SaveToPlaylist(VideoItem),
+    SaveToPlaylist {
+        video: VideoItem,
+        /// playlist ids already containing the video; None while being checked
+        membership: Option<std::collections::HashSet<String>>,
+    },
     TextPrompt { title: String, placeholder: String, on_submit: Arc<dyn Fn(String, &mut Window, &mut App)> },
     Confirm { title: String, body: String, confirm: String, on_confirm: Arc<dyn Fn(&mut Window, &mut App)> },
     /// a newer version is on GitHub
@@ -373,7 +377,36 @@ pub fn sign_out(cx: &mut App) {
 }
 
 pub fn open_save_dialog(v: VideoItem, window: &mut Window, cx: &mut App) {
-    open_dialog(Dialog::SaveToPlaylist(v), window, cx);
+    let vid = v.id.clone();
+    let signed_in = crate::api::auth::signed_in();
+    let membership = (!signed_in).then(std::collections::HashSet::new);
+    open_dialog(Dialog::SaveToPlaylist { video: v, membership }, window, cx);
+    if signed_in {
+        cx.spawn(async move |cx| {
+            let check_id = vid.clone();
+            let res = blocking(move || crate::api::auth::playlist_membership(&check_id)).await;
+            let _ = cx.update(move |cx| {
+                let checked = match res {
+                    Ok(set) => set,
+                    Err(e) => {
+                        toast(cx, format!("Could not check playlists: {e}"));
+                        Default::default()
+                    }
+                };
+                if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
+                    app.update(cx, move |a, cx| {
+                        if let Some(Dialog::SaveToPlaylist { video, membership }) = &mut a.dialog
+                            && video.id == vid
+                        {
+                            *membership = Some(checked);
+                            cx.notify();
+                        }
+                    });
+                }
+            });
+        })
+        .detach();
+    }
 }
 
 pub fn open_dialog(d: Dialog, window: &mut Window, cx: &mut App) {
@@ -406,7 +439,7 @@ pub fn confirm(title: &str, body: &str, confirm: &str, window: &mut Window, cx: 
     );
 }
 
-// ───────────────────────── AppView ─────────────────────────
+// ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ AppView ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /// A tab that isn't the one shown. The shown tab lives in AppView's own
 /// route/page/history fields; switching swaps them with one of these.
@@ -894,7 +927,7 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().flex().items_center().gap_2().child(spinner(cx)).child(div().text_xs().text_color(p.text3).child("Waiting for sign-in…")))
+                        .child(div().flex().items_center().gap_2().child(spinner(cx)).child(div().text_xs().text_color(p.text3).child("Waiting for sign-inΓÇª")))
                         .child(cancel),
                 )
                 .child(cookies_link);
@@ -977,7 +1010,7 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_xs().text_color(p.text3).child("Waiting for approval…"))
+                        .child(div().text_xs().text_color(p.text3).child("Waiting for approvalΓÇª"))
                         .child(
                             div()
                                 .flex()
@@ -1002,7 +1035,7 @@ impl AppView {
                     .gap_3()
                     .py_4()
                     .child(spinner(cx))
-                    .child(div().text_sm().text_color(p.text2).child("Getting a code…")),
+                    .child(div().text_sm().text_color(p.text2).child("Getting a codeΓÇª")),
             );
         }
         col.into_any_element()
@@ -1048,7 +1081,7 @@ impl AppView {
             .child(crate::ui::avatar(acc.avatar.as_deref(), px(30.), &acc.name, cx))
             .on_click(move |ev, window, cx| {
                 let label = match &acc.handle {
-                    Some(h) => format!("{}  ·  {}", acc.name, h),
+                    Some(h) => format!("{}  ┬╖  {}", acc.name, h),
                     None => acc.name.clone(),
                 };
                 let handle = acc.handle.clone();
@@ -1149,7 +1182,7 @@ impl AppView {
         }
     }
 
-    // ───── tabs ─────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇ tabs ΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     pub fn new_tab(&mut self, route: Route, title: Option<String>, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
         match &route {
@@ -1803,10 +1836,10 @@ impl AppView {
             let id = j.id;
             let title = if j.video.title.is_empty() { j.video.id.clone() } else { j.video.title.clone() };
             let (line, color, running) = match &j.status {
-                JobStatus::Queued => ("Waiting…".to_string(), p.text2, true),
-                JobStatus::Running => (format!("{:.0}%  {}", j.progress * 100.0, j.detail.split("at").nth(1).map(|s| format!("· {}", s.trim())).unwrap_or_default()), p.text2, true),
+                JobStatus::Queued => ("WaitingΓÇª".to_string(), p.text2, true),
+                JobStatus::Running => (format!("{:.0}%  {}", j.progress * 100.0, j.detail.split("at").nth(1).map(|s| format!("┬╖ {}", s.trim())).unwrap_or_default()), p.text2, true),
                 JobStatus::Done(path) => (
-                    std::fs::metadata(path).map(|m| format!("{:.1} MB · {}", m.len() as f64 / 1e6, j.format)).unwrap_or_else(|_| "File missing".into()),
+                    std::fs::metadata(path).map(|m| format!("{:.1} MB ┬╖ {}", m.len() as f64 / 1e6, j.format)).unwrap_or_else(|_| "File missing".into()),
                     p.text2,
                     false,
                 ),
@@ -1968,7 +2001,7 @@ impl AppView {
         )
     }
 
-    // ───── keyboard ─────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇ keyboard ΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     fn on_key_up(&mut self, ev: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if ev.keystroke.key != "space" || !std::mem::take(&mut self.space_down) {
@@ -2283,7 +2316,7 @@ impl AppView {
         }
     }
 
-    // ───── chrome ─────
+    // ΓöÇΓöÇΓöÇΓöÇΓöÇ chrome ΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
@@ -2916,7 +2949,7 @@ impl AppView {
         let mut notes = strip_download_section(&rel.notes.replace("\r\n", "\n"));
         if notes.chars().count() > 1400 {
             let cut: String = notes.chars().take(1400).collect();
-            notes = cut.rsplit_once('\n').map(|(a, _)| a.to_string()).unwrap_or(cut) + "\n\n…";
+            notes = cut.rsplit_once('\n').map(|(a, _)| a.to_string()).unwrap_or(cut) + "\n\nΓÇª";
         }
         let has_installer = cfg!(windows) && rel.asset.is_some();
         let size = rel.asset.as_ref().map(|a| a.size).filter(|s| *s > 0).map(|s| format!("{:.0} MB", s as f64 / 1_048_576.0));
@@ -2979,7 +3012,7 @@ impl AppView {
                     .child("New version"),
             )
             .child(div().text_3xl().font_weight(FontWeight::BOLD).text_color(white()).child(format!("Stream Tube {version}")))
-            .child(div().text_sm().text_color(hsla(0., 0., 1., 0.85)).child(meta.join("  ·  ")));
+            .child(div().text_sm().text_color(hsla(0., 0., 1., 0.85)).child(meta.join("  ┬╖  ")));
 
         let mut body = div().flex().flex_col().gap_4().p_6();
         if !notes.trim().is_empty() {
@@ -3009,7 +3042,7 @@ impl AppView {
                             .flex()
                             .justify_between()
                             .text_sm()
-                            .child(div().text_color(p.text).font_weight(FontWeight::MEDIUM).child(if f >= 0.999 { "Installing…" } else { "Downloading…" }))
+                            .child(div().text_color(p.text).font_weight(FontWeight::MEDIUM).child(if f >= 0.999 { "InstallingΓÇª" } else { "DownloadingΓÇª" }))
                             .child(div().text_color(p.text2).child(format!("{:.0}%", f * 100.0))),
                     )
                     .child(
@@ -3100,85 +3133,165 @@ impl AppView {
         let body: AnyElement = match d {
             Dialog::SignIn => self.render_sign_in(cx),
             Dialog::WebSignIn => self.render_web_sign_in(cx),
-            Dialog::SaveToPlaylist(v) => {
-                let v = v.clone();
+            Dialog::SaveToPlaylist { video, membership } => {
+                let v = video.clone();
+                let membership = membership.clone();
                 enum Target {
                     Local(store::LocalPlaylist),
                     Remote(crate::api::types::PlaylistItem, bool),
                 }
-                let mut targets: Vec<Target> = store::playlists().into_iter().map(Target::Local).collect();
+                let mut targets: Vec<(Target, bool)> = store::playlists()
+                    .into_iter()
+                    .map(|pl| {
+                        let contains = store::playlist_contains(pl.id, &v.id);
+                        (Target::Local(pl), contains)
+                    })
+                    .collect();
                 if crate::api::auth::signed_in() {
                     for cp in store::account_playlists() {
-                        targets.push(Target::Remote(cp.item, cp.pinned));
+                        let contains = membership.as_ref().map(|m| m.contains(&cp.item.id)).unwrap_or(false);
+                        targets.push((Target::Remote(cp.item, cp.pinned), contains));
                     }
                 }
-                // pinned playlists first, everything else keeps its order
-                targets.sort_by_key(|t| !matches!(t, Target::Remote(_, true)));
+                // playlists already containing the video first, then pinned, then the rest
+                targets.sort_by_key(|(t, contains)| (!*contains, !matches!(t, Target::Remote(_, true))));
+                let loading = membership.is_none();
+                let rows: Vec<AnyElement> = if loading {
+                    Vec::new()
+                } else {
+                    targets
+                        .into_iter()
+                        .map(|(target, contains)| match target {
+                            Target::Local(pl) => {
+                                let v2 = v.clone();
+                                let aux_v = v.clone();
+                                let pl_id = pl.id;
+                                let pl_name = pl.name.clone();
+                                let aux_name = pl.name.clone();
+                                div()
+                                    .id(SharedString::from(format!("dlg-pl-{pl_id}")))
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .py_2()
+                                    .px_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(p.hover))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("dlg-cb-{pl_id}")))
+                                            .cursor_pointer()
+                                            .on_aux_click(cx.listener(move |_, _, _, cx| {
+                                                if store::playlist_contains(pl_id, &aux_v.id) {
+                                                    store::playlist_remove(pl_id, &aux_v.id);
+                                                    toast(cx, format!("Removed from {aux_name}"));
+                                                } else {
+                                                    store::playlist_add(pl_id, &aux_v);
+                                                    toast(cx, format!("Saved to {aux_name}"));
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(icon(if contains { "square-check" } else { "square" }).text_color(p.text)),
+                                    )
+                                    .child(div().flex_1().text_sm().text_color(p.text).child(pl.name.clone()))
+                                    .child(icon(if pl.protected { "lock" } else { "globe-lock" }).size_4().text_color(p.text3))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if store::playlist_contains(pl_id, &v2.id) {
+                                            store::playlist_remove(pl_id, &v2.id);
+                                            toast(cx, format!("Removed from {pl_name}"));
+                                        } else {
+                                            store::playlist_add(pl_id, &v2);
+                                            toast(cx, format!("Saved to {pl_name}"));
+                                        }
+                                        this.dialog = None;
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
+                            }
+                            Target::Remote(pl, pinned) => {
+                                let left = (pl.id.clone(), v.id.clone(), pl.title.clone());
+                                let right = (pl.id.clone(), v.id.clone(), pl.title.clone());
+                                div()
+                                    .id(SharedString::from(format!("dlg-ytpl-{}", pl.id)))
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .py_2()
+                                    .px_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(p.hover))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("dlg-cb-{}", pl.id)))
+                                            .cursor_pointer()
+                                            .on_aux_click(cx.listener(move |this, _, _, cx| {
+                                                let now_in = !contains;
+                                                if let Some(Dialog::SaveToPlaylist { membership: Some(m), .. }) = &mut this.dialog {
+                                                    if now_in {
+                                                        m.insert(right.0.clone());
+                                                    } else {
+                                                        m.remove(&right.0);
+                                                    }
+                                                }
+                                                let (pid, vid, name) = right.clone();
+                                                cx.spawn(async move |this, cx| {
+                                                    let res = blocking(move || {
+                                                        if now_in {
+                                                            crate::api::auth::playlist_add(&pid, &vid)
+                                                        } else {
+                                                            crate::api::auth::playlist_remove(&pid, &vid)
+                                                        }
+                                                    })
+                                                    .await;
+                                                    let _ = this.update(cx, |_, cx| match res {
+                                                        Ok(()) if now_in => toast(cx, format!("Saved to {name}")),
+                                                        Ok(()) => toast(cx, format!("Removed from {name}")),
+                                                        Err(e) => toast(cx, format!("Could not save: {e}")),
+                                                    });
+                                                })
+                                                .detach();
+                                                cx.notify();
+                                            }))
+                                            .child(icon(if contains { "square-check" } else { "square" }).text_color(p.text)),
+                                    )
+                                    .child(div().flex_1().text_sm().text_color(p.text).child(pl.title.clone()))
+                                    .when(pinned, |d| d.child(icon("pin").size_4().text_color(p.text3)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let now_in = !contains;
+                                        this.dialog = None;
+                                        cx.notify();
+                                        let (pid, vid, name) = left.clone();
+                                        cx.spawn(async move |this, cx| {
+                                            let res = blocking(move || {
+                                                if now_in {
+                                                    crate::api::auth::playlist_add(&pid, &vid)
+                                                } else {
+                                                    crate::api::auth::playlist_remove(&pid, &vid)
+                                                }
+                                            })
+                                            .await;
+                                            let _ = this.update(cx, |_, cx| match res {
+                                                Ok(()) if now_in => toast(cx, format!("Saved to {name}")),
+                                                Ok(()) => toast(cx, format!("Removed from {name}")),
+                                                Err(e) => toast(cx, format!("Could not save: {e}")),
+                                            });
+                                        })
+                                        .detach();
+                                    }))
+                                    .into_any_element()
+                            }
+                        })
+                        .collect()
+                };
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child("Save video to…"))
-                    .children(targets.into_iter().map(|target| match target {
-                        Target::Local(pl) => {
-                            let contains = store::playlist_contains(pl.id, &v.id);
-                            let v2 = v.clone();
-                            div()
-                                .id(SharedString::from(format!("dlg-pl-{}", pl.id)))
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .py_2()
-                                .px_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(p.hover))
-                                .child(icon(if contains { "square-check" } else { "square" }).text_color(p.text))
-                                .child(div().flex_1().text_sm().text_color(p.text).child(pl.name.clone()))
-                                .child(icon(if pl.protected { "lock" } else { "globe-lock" }).size_4().text_color(p.text3))
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    if store::playlist_contains(pl.id, &v2.id) {
-                                        store::playlist_remove(pl.id, &v2.id);
-                                        toast(cx, format!("Removed from {}", pl.name));
-                                    } else {
-                                        store::playlist_add(pl.id, &v2);
-                                        toast(cx, format!("Saved to {}", pl.name));
-                                    }
-                                    cx.notify();
-                                }))
-                                .into_any_element()
-                        }
-                        Target::Remote(pl, pinned) => {
-                            let pid = pl.id.clone();
-                            let vid = v.id.clone();
-                            let name = pl.title.clone();
-                            div()
-                                .id(SharedString::from(format!("dlg-ytpl-{}", pl.id)))
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .py_2()
-                                .px_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(p.hover))
-                                .child(icon("list-video").text_color(p.text))
-                                .child(div().flex_1().text_sm().text_color(p.text).child(name.clone()))
-                                .when(pinned, |d| d.child(icon("pin").size_4().text_color(p.text3)))
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    let (pid, vid, name) = (pid.clone(), vid.clone(), name.clone());
-                                    cx.spawn(async move |this, cx| {
-                                        let res = blocking(move || crate::api::auth::playlist_add(&pid, &vid)).await;
-                                        let _ = this.update(cx, |_, cx| match res {
-                                            Ok(()) => toast(cx, format!("Saved to {name}")),
-                                            Err(e) => toast(cx, format!("Could not save: {e}")),
-                                        });
-                                    })
-                                    .detach();
-                                }))
-                                .into_any_element()
-                        }
-                    }))
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child("Save video toâ€¦"))
+                    .when(loading, |d| d.child(div().py_6().flex().justify_center().child(spinner(cx))))
+                    .children(rows)
                     .child(
                         div()
                             .id("dlg-new")
