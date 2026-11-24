@@ -60,7 +60,7 @@ impl PlayerView {
             show_until: Instant::now() + Duration::from_secs(3),
             hovering: false,
             menu: None,
-            menu_closed_at: std::time::Instant::now() - std::time::Duration::from_secs(5),
+            menu_closed_at: Instant::now() - std::time::Duration::from_secs(5),
             seek_bounds: Rc::new(Cell::new(Bounds::default())),
             vol_bounds: Rc::new(Cell::new(Bounds::default())),
             hover_frac: None,
@@ -74,6 +74,16 @@ impl PlayerView {
             hover_annotation: None,
             _sub: sub,
         }
+    }
+
+    /// Shows another tab's player in this view (the old one keeps running in its tab).
+    pub fn set_player(&mut self, player: Entity<Player>, cx: &mut Context<Self>) {
+        if self.player == player {
+            return;
+        }
+        self.player = player.clone();
+        self._sub = cx.observe(&player, |_, _, cx| cx.notify());
+        cx.notify();
     }
 
     fn poke(&mut self, cx: &mut Context<Self>) {
@@ -202,6 +212,26 @@ impl Render for PlayerView {
                 if !*h {
                     this.hover_frac = None;
                 }
+                cx.notify();
+            }))
+            // wheel over a playing video changes the volume instead of scrolling the page
+            .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
+                let (paused, has_video, volume) = {
+                    let pl = this.player.read(cx);
+                    (pl.paused, pl.video.is_some(), pl.volume)
+                };
+                if paused || !has_video {
+                    return;
+                }
+                let delta = match ev.delta {
+                    ScrollDelta::Lines(d) => d.y * 2.0,
+                    ScrollDelta::Pixels(d) => f32::from(d.y) / 30.0,
+                };
+                if delta == 0.0 {
+                    return;
+                }
+                cx.stop_propagation();
+                this.player.update(cx, |p, _| p.set_volume(volume + delta as f64));
                 cx.notify();
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
@@ -977,6 +1007,52 @@ impl PlayerView {
                 .hover(|s| s.bg(hsla(0., 0., 1., 0.15)))
                 .child(icon(name).size_6().text_color(white()))
         };
+        let speed_btn = |id: &'static str, name: &'static str, delta: f64| {
+            let pp = pp.clone();
+            div()
+                .id(id)
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size_8()
+                .rounded_full()
+                .cursor_pointer()
+                .hover(|s| s.bg(hsla(0., 0., 1., 0.15)))
+                .child(icon(name).size_4().text_color(white()))
+                .on_click(move |_, _, cx| {
+                    pp.update(cx, |p, cx| {
+                        let s = p.speed;
+                        p.set_speed(s + delta);
+                        cx.notify()
+                    })
+                })
+        };
+        let speed_group = div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .child(speed_btn("c-spd-down", "minus", -st.speed_down_step.max(0.01)))
+            .child(
+                div()
+                    .id("c-spd")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_w(px(42.))
+                    .h_8()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(hsla(0., 0., 1., 0.15)))
+                    .text_sm()
+                    .text_color(white())
+                    .child(format!("{}x", pl.speed))
+                    .on_click(cx.listener(|t, _, _, cx| {
+                        t.menu = Some(Menu::Speed);
+                        cx.notify();
+                    })),
+            )
+            .child(speed_btn("c-spd-up", "plus", st.speed_up_step.max(0.01)));
         let vol_icon = if muted || volume <= 0.0 { "volume-x" } else if volume < 50.0 { "volume-1" } else { "volume-2" };
         let vol_frac = if muted { 0.0 } else { (volume / 100.0).min(1.0) as f32 };
         let time_text = if is_live {
@@ -1085,6 +1161,8 @@ impl PlayerView {
                         })),
                 )
             })
+            .child(speed_group)
+            .when(has_captions, |d| d.child(div().w(px(1.)).h_5().mx_1().bg(hsla(0., 0., 1., 0.25))))
             .when(has_captions, |d| {
                 d.child(
                     ctl_btn("c-cc", if caption_on { "captions" } else { "captions-off" }).on_click(cx.listener(|this, _, _, cx| {
@@ -1329,12 +1407,7 @@ impl PlayerView {
             }));
         match menu {
             Menu::Main => {
-                let q = if pl.audio_only {
-                    "Audio only".to_string()
-                } else {
-                    let h = pl.current_height();
-                    if h > 0 { format!("{}p", h) } else { "Auto".into() }
-                };
+                let q = pl.current_quality_label();
                 let caption = pl
                     .caption
                     .and_then(|i| pl.streams.as_ref()?.captions.get(i))
@@ -1413,15 +1486,30 @@ impl PlayerView {
             }
             Menu::Quality => {
                 let cur = pl.quality;
-                let quals = pl.available_qualities();
+                let fps = pl.current_fps();
+                let variants = pl.available_variants();
+                let list_variants = store::settings_snapshot().quality_variants;
+                let pref_fps = store::settings_snapshot().preferred_fps;
                 panel = panel.child(header("Quality", cx));
-                for q in quals {
+                let picked: Vec<(u32, u32)> = if list_variants {
+                    variants
+                } else {
+                    // one entry per resolution, carrying its best frame rate
+                    let mut seen: Vec<u32> = Vec::new();
+                    variants.into_iter().filter(|(h, _)| if seen.contains(h) { false } else { seen.push(*h); true }).collect()
+                };
+                for (h, r) in picked {
+                    let label = crate::api::streams::quality_label(h, if list_variants { r } else { 0 });
+                    let label = format!("{label}{}", if h >= 2160 { " 4K" } else if h >= 720 { " HD" } else { "" });
+                    // grouped mode keeps the saved preference; variants mode sets the exact one
+                    let want_fps = if list_variants { r } else { pref_fps };
+                    let active = h == cur && (!list_variants || r == fps);
                     panel = panel.child(
-                        row(SharedString::from(format!("q-{q}")), None, format!("{q}p{}", if q >= 2160 { " 4K" } else if q >= 720 { " HD" } else { "" }), None, q == cur)
+                        row(SharedString::from(format!("q-{h}-{r}")), None, label, None, active)
                             .on_click(cx.listener(move |t, _, _, cx| {
                                 t.menu = None;
                                 // set_quality keeps it as the default only when "Remember last quality" is on
-                                t.player.update(cx, |p, cx| p.set_quality(q, cx));
+                                t.player.update(cx, |p, cx| p.set_quality(h, want_fps, cx));
                             })),
                     );
                 }

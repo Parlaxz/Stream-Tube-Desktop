@@ -50,7 +50,7 @@ If there are no incoming changes, skip the merge. Keep all personal modification
 
 ### 3. Validate and push
 
-Review the merged changes, run the existing relevant tests, and build and launch the application. Verify that custom features still work and that the upstream binary updater remains disabled. If validation fails, do not push; fix the issue or abort the pending merge.
+Review the merged changes, run the existing relevant tests, and build and launch the application. Verify that custom features still work and that the updater still points at this fork's releases (`REPO` in `src/updater.rs`), never at upstream. If validation fails, do not push; fix the issue or abort the pending merge.
 
 Once validated:
 
@@ -77,7 +77,7 @@ The remote `custom` branch remains unchanged until a successful push. The clean 
 
 - Never automatically sync, install, or execute upstream updates.
 - Never force-push, discard local work, or push to the original repository.
-- Keep the original binary updater disabled.
+- Keep the updater pointed at this fork's releases only.
 - Keep synchronization simple; no additional infrastructure is required.
 
 ## Future agent instruction

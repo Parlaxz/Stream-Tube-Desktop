@@ -347,7 +347,7 @@ fn hls_variants(master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat
         let (w, h) = attr(l, "RESOLUTION")
             .and_then(|r| r.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
             .unwrap_or((0, 0));
-        let fps = attr(l, "FRAME-RATE").and_then(|f| f.parse::<f64>().ok()).unwrap_or(0.0) as u32;
+        let fps = attr(l, "FRAME-RATE").and_then(|f| f.parse::<f64>().ok()).unwrap_or(0.0).round() as u32;
         let bitrate = attr(l, "BANDWIDTH").and_then(|b| b.parse().ok()).unwrap_or(0);
         let class = quality_class(w, h);
         // one entry per quality: keep the higher-bitrate variant
@@ -367,7 +367,7 @@ fn hls_variants(master_url: &str) -> Result<(Vec<StreamFormat>, Vec<StreamFormat
             width: w,
             height: h,
             fps,
-            quality_label: format!("{class}p{}", if fps > 30 { fps.to_string() } else { String::new() }),
+            quality_label: quality_label(class, fps),
             ..Default::default()
         });
     }
@@ -679,7 +679,7 @@ pub fn ytdlp_streams(video_id: &str) -> Result<StreamInfo> {
             bitrate: (f.get("tbr").and_then(Value::as_f64).unwrap_or(0.0) * 1000.0) as u64,
             width: f.get("width").and_then(Value::as_u64).unwrap_or(0) as u32,
             height,
-            fps: f.get("fps").and_then(Value::as_f64).unwrap_or(0.0) as u32,
+            fps: f.get("fps").and_then(Value::as_f64).unwrap_or(0.0).round() as u32,
             quality_label: if height > 0 { format!("{height}p") } else { String::new() },
             audio_language: s(f, "/language"),
             audio_default: f.get("language_preference").and_then(Value::as_i64).unwrap_or(0) >= 0,
@@ -731,9 +731,16 @@ pub fn fmt_class(f: &StreamFormat) -> u32 {
     quality_class(f.width, f.height)
 }
 
+/// "1080p60" for a quality class and frame rate. A zero frame rate shows the
+/// resolution alone, as when the rate is not known yet.
+pub fn quality_label(class: u32, fps: u32) -> String {
+    if fps > 0 { format!("{class}p{fps}") } else { format!("{class}p") }
+}
+
 pub fn pick_formats<'a>(
     info: &'a StreamInfo,
     max_height: u32,
+    fps_pref: u32,
     codec_pref: &str,
     audio_lang: Option<&str>,
 ) -> (Option<&'a StreamFormat>, Option<&'a StreamFormat>) {
@@ -754,7 +761,15 @@ pub fn pick_formats<'a>(
         .video
         .iter()
         .filter(|f| max_height == 0 || fmt_class(f) <= max_height)
-        .max_by_key(|f| if enhanced { (fmt_class(f), f.fps, f.bitrate as u32 / 1000, codec_rank(f)) } else { (fmt_class(f), f.fps, codec_rank(f), f.bitrate as u32 / 1000) })
+        .max_by_key(|f| {
+            // an exact frame-rate match beats a higher one; 0 means "any"
+            let fps_match = (fps_pref != 0 && f.fps == fps_pref) as u8;
+            if enhanced {
+                (fmt_class(f), fps_match, f.fps, f.bitrate as u32 / 1000, codec_rank(f))
+            } else {
+                (fmt_class(f), fps_match, f.fps, codec_rank(f), f.bitrate as u32 / 1000)
+            }
+        })
         .or_else(|| info.video.iter().min_by_key(|f| fmt_class(f)));
     let audio = {
         let mut cands: Vec<&StreamFormat> = info.audio.iter().collect();
@@ -810,10 +825,32 @@ mod tests {
         let s = get_streams(&id).unwrap();
         println!("heights: {:?}", s.video.iter().map(|v| v.height).collect::<Vec<_>>());
         println!("{} via {} v={} a={} subs={} sb={:?}", s.title, s.source, s.video.len(), s.audio.len(), s.captions.len(), s.storyboard);
-        let (v, a) = pick_formats(&s, 1080, "vp9", None);
+        let (v, a) = pick_formats(&s, 1080, 0, "vp9", None);
         println!("{:?} {:?}", v.map(|v| (&v.quality_label, &v.codecs)), a.map(|a| &a.codecs));
         // HLS sources carry their audio in the manifest
         assert!(v.is_some() && (a.is_some() || s.hls_only));
+    }
+
+    #[test]
+    fn fps_preference_picks_the_wanted_variant() {
+        let f = |height: u32, fps: u32, bitrate: u64| StreamFormat {
+            width: height * 16 / 9,
+            height,
+            fps,
+            bitrate,
+            codecs: "vp9".into(),
+            ..Default::default()
+        };
+        let info = StreamInfo {
+            video: vec![f(1080, 60, 8_000_000), f(1080, 30, 3_000_000), f(720, 60, 4_000_000)],
+            ..Default::default()
+        };
+        let fps = |pref| pick_formats(&info, 1080, pref, "vp9", None).0.unwrap().fps;
+        assert_eq!(fps(30), 30, "30 fps requested, 60 also offered");
+        assert_eq!(fps(60), 60);
+        assert_eq!(fps(0), 60, "no preference keeps the highest rate");
+        assert_eq!(quality_label(1080, 60), "1080p60");
+        assert_eq!(quality_label(1080, 0), "1080p");
     }
 }
 
@@ -855,7 +892,7 @@ mod ua_tests {
     fn live_parallel() {
         let id = std::env::var("VID").unwrap_or_else(|_| "q0aFOxT6TNw".into());
         let s = android_vr(&id).unwrap();
-        let (v, a) = pick_formats(&s, 1080, "vp9", None);
+        let (v, a) = pick_formats(&s, 1080, 0, "vp9", None);
         let urls = vec![v.unwrap().url.clone(), a.unwrap().url.clone(), v.unwrap().url.clone()];
         let hs: Vec<_> = urls.into_iter().enumerate().map(|(k, u)| std::thread::spawn(move || {
             let agent = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();

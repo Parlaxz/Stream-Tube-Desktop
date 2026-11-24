@@ -8,6 +8,7 @@ use crate::ui::{blocking, toast};
 use gpui_kit::*;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 pub enum PlayerEvent {
     Ended,
@@ -26,6 +27,8 @@ pub struct Player {
     pub loading: bool,
     pub error: Option<String>,
     pub quality: u32,
+    /// Frame rate chosen in the quality menu (0 = highest available).
+    pub quality_fps: u32,
     pub audio_only: bool,
     pub time: f64,
     pub duration: f64,
@@ -65,6 +68,8 @@ pub struct Player {
     pub audio_track: Option<String>,
     /// "Stats for nerds" overlay
     pub show_stats: bool,
+    /// The video was playing when its tab was left; resume it when the tab is shown again.
+    resume_on_show: bool,
 }
 
 impl EventEmitter<PlayerEvent> for Player {}
@@ -76,8 +81,32 @@ pub fn player(cx: &App) -> Entity<Player> {
     cx.global::<PlayerHandle>().0.clone()
 }
 
+fn players_registry() -> &'static parking_lot::Mutex<Vec<WeakEntity<Player>>> {
+    static PLAYERS: OnceLock<parking_lot::Mutex<Vec<WeakEntity<Player>>>> = OnceLock::new();
+    PLAYERS.get_or_init(|| parking_lot::Mutex::new(Vec::new()))
+}
+
+/// Every Player alive in the window, for settings that must reach parked tabs too.
+fn all_players() -> Vec<Entity<Player>> {
+    let mut reg = players_registry().lock();
+    reg.retain(|w| w.upgrade().is_some());
+    reg.iter().filter_map(|w| w.upgrade()).collect()
+}
+
 pub fn init(cx: &mut App) {
+    let p = create(cx);
+    cx.set_global(PlayerHandle(p));
+}
+
+/// Creates a Player for a tab and keeps it countable for settings changes.
+pub fn create(cx: &mut App) -> Entity<Player> {
     let p = cx.new(Player::new);
+    players_registry().lock().push(p.downgrade());
+    p
+}
+
+/// Makes `p` the player the UI and `player(cx)` callers see.
+pub fn set_active(p: Entity<Player>, cx: &mut App) {
     cx.set_global(PlayerHandle(p));
 }
 
@@ -111,6 +140,7 @@ impl Player {
             loading: false,
             error: None,
             quality: s.default_quality,
+            quality_fps: s.preferred_fps,
             audio_only: s.audio_only,
             time: 0.0,
             duration: 0.0,
@@ -148,6 +178,7 @@ impl Player {
             last_activity: std::time::Instant::now(),
             audio_track: None,
             show_stats: false,
+            resume_on_show: false,
         }
         .with_cx(cx)
     }
@@ -176,8 +207,6 @@ impl Player {
             ("input-vo-keyboard", "no"),
             ("osc", "no"),
             ("cache", "yes"),
-            ("demuxer-max-bytes", "96MiB"),
-            ("demuxer-max-back-bytes", "24MiB"),
             ("demuxer-readahead-secs", "40"),
             ("network-timeout", "20"),
             ("user-agent", ua),
@@ -202,6 +231,8 @@ impl Player {
         let opts: Vec<(&str, &str)> = opts.into_iter().collect();
         let proxy = s.proxy.clone();
         let mut opts_owned: Vec<(String, String)> = opts.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        opts_owned.push(("demuxer-max-bytes".into(), format!("{}MiB", s.read_ahead_mb)));
+        opts_owned.push(("demuxer-max-back-bytes".into(), format!("{}MiB", s.read_ahead_back_mb)));
         // normal videos reach mpv through the app's local stream proxy, which already
         // uses the user's proxy; mpv itself only fetches live streams directly, and can
         // only use HTTP proxies (127.0.0.1 is excluded through no_proxy, see main)
@@ -494,6 +525,7 @@ impl Player {
         self.time = 0.0;
         self.duration = video.duration_secs.unwrap_or(0) as f64;
         self.eof = false;
+        self.resume_on_show = false;
         self.segments.clear();
         self.skipped.clear();
         self.sb_prompt = None;
@@ -660,11 +692,11 @@ impl Player {
         let s = store::settings_snapshot();
         let src = if info.hls_only {
             let audio = streams::hls_audio_choice(&info, self.audio_track.as_deref());
-            info.hls_url.as_deref().map(|u| crate::player::proxy::local_hls(u, self.quality, audio.as_deref()))
+            info.hls_url.as_deref().map(|u| crate::player::proxy::local_hls(u, self.quality, self.quality_fps, audio.as_deref()))
         } else if info.is_live || (info.video.is_empty() && info.muxed.is_empty()) {
             info.hls_url.clone()
         } else {
-            let (v, a) = streams::pick_formats(&info, self.quality, &s.codec_pref, self.audio_track.as_deref());
+            let (v, a) = streams::pick_formats(&info, self.quality, self.quality_fps, &s.codec_pref, self.audio_track.as_deref());
             let v = if self.audio_only { None } else { v };
             if v.is_none() && a.is_none() {
                 info.muxed.last().map(|m| m.url.clone())
@@ -736,6 +768,8 @@ impl Player {
         self.loop_video = s.loop_video;
         if let Some(m) = &self.mpv {
             m.set("hwdec", if s.hwdec { "auto-copy" } else { "no" });
+            m.set("demuxer-max-bytes", &format!("{}MiB", s.read_ahead_mb));
+            m.set("demuxer-max-back-bytes", &format!("{}MiB", s.read_ahead_back_mb));
         }
         self.apply_caption_style();
         if self.video.is_some() {
@@ -807,11 +841,15 @@ impl Player {
         None
     }
 
-    pub fn set_quality(&mut self, q: u32, cx: &mut Context<Self>) {
+    pub fn set_quality(&mut self, q: u32, fps: u32, cx: &mut Context<Self>) {
         if q > 0 && store::settings_snapshot().remember_quality {
-            store::update_settings(|s| s.default_quality = q);
+            store::update_settings(|s| {
+                s.default_quality = q;
+                s.preferred_fps = fps;
+            });
         }
         self.quality = q;
+        self.quality_fps = fps;
         let t = self.time;
         self.load_current(Some(t), true, cx);
     }
@@ -832,11 +870,12 @@ impl Player {
         self.load_current(Some(t), true, cx);
     }
 
-    pub fn available_qualities(&self) -> Vec<u32> {
-        let mut q: Vec<u32> = self
+    /// Distinct (resolution class, frame rate) pairs, best first.
+    pub fn available_variants(&self) -> Vec<(u32, u32)> {
+        let mut q: Vec<(u32, u32)> = self
             .streams
             .as_ref()
-            .map(|s| s.video.iter().filter(|f| f.height > 0).map(streams::fmt_class).collect())
+            .map(|s| s.video.iter().filter(|f| f.height > 0).map(|f| (streams::fmt_class(f), f.fps)).collect())
             .unwrap_or_default();
         q.sort_unstable_by(|a, b| b.cmp(a));
         q.dedup();
@@ -859,6 +898,30 @@ impl Player {
             return 0;
         }
         streams::quality_class(self.video_size.0 as u32, self.video_size.1 as u32)
+    }
+
+    /// Frame rate mpv is decoding, else the one chosen for the next load.
+    pub fn current_fps(&self) -> u32 {
+        let live = self
+            .mpv
+            .as_ref()
+            .and_then(|m| m.get_f64("container-fps"))
+            .filter(|f| *f > 1.0)
+            .map(|f| f.round() as u32)
+            .unwrap_or(0);
+        if live > 0 { live } else { self.quality_fps }
+    }
+
+    /// "1080p60" for the menu row; the actual picture wins over the selection.
+    pub fn current_quality_label(&self) -> String {
+        if self.audio_only {
+            return "Audio only".into();
+        }
+        let h = self.current_height();
+        if h == 0 {
+            return "Auto".into();
+        }
+        streams::quality_label(h, self.current_fps())
     }
 
     /// Playback details for the "Stats for nerds" overlay, read from mpv.
@@ -1036,6 +1099,7 @@ impl Player {
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         self.save_progress(true);
+        self.resume_on_show = false;
         if let Some(v) = &self.video {
             crate::api::web::report_stop(&v.id, self.time);
         }
@@ -1050,6 +1114,32 @@ impl Player {
         self.queue_pos = None;
         if let Some(old) = self.frame.take() {
             cx.drop_image(old, None);
+        }
+        cx.notify();
+    }
+
+    /// Pauses playback but keeps the engine, its demuxer cache and the exact
+    /// position alive for when the tab is shown again.
+    pub fn park(&mut self, cx: &mut Context<Self>) {
+        if self.video.is_none() {
+            return;
+        }
+        self.resume_on_show = !self.paused;
+        self.set_paused(true);
+        cx.notify();
+    }
+
+    /// Shows this tab again: the frames and cache are already there.
+    pub fn unpark(&mut self, cx: &mut Context<Self>) {
+        if self.video.is_none() {
+            return;
+        }
+        if let Some(m) = &self.mpv {
+            m.redraw();
+        }
+        if self.resume_on_show {
+            self.resume_on_show = false;
+            self.set_paused(false);
         }
         cx.notify();
     }
@@ -1079,6 +1169,21 @@ impl Player {
 /// Applies changed settings to the running player.
 pub fn apply_settings(cx: &mut App) {
     player(cx).update(cx, |p, cx| p.apply_settings(cx));
+}
+
+/// Applies the read-ahead settings to every live player, including parked tabs.
+pub fn apply_read_ahead(cx: &mut App) {
+    let s = store::settings_snapshot();
+    let fwd = format!("{}MiB", s.read_ahead_mb);
+    let back = format!("{}MiB", s.read_ahead_back_mb);
+    for p in all_players() {
+        p.update(cx, |p, _| {
+            if let Some(m) = &p.mpv {
+                m.set("demuxer-max-bytes", &fwd);
+                m.set("demuxer-max-back-bytes", &back);
+            }
+        });
+    }
 }
 
 struct Guard<F: FnMut()>(F);

@@ -5,6 +5,7 @@ use crate::api::types::VideoItem;
 use crate::store;
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Default, Debug)]
@@ -114,6 +115,69 @@ fn split_csv(line: &str) -> Vec<String> {
         }
     }
     out.push(cur.trim().to_string());
+    out
+}
+
+/// PocketTube subscription export: `Title,Link,Subscribers,Groups`.
+/// Each row is one channel; `Groups` holds the profile names it belongs to
+/// (comma or semicolon separated). Channels without a group are left alone.
+pub fn import_profiles(path: &Path) -> Result<String> {
+    let raw = std::fs::read(path)?;
+    let text = String::from_utf8_lossy(&raw).trim_start_matches('\u{feff}').to_string();
+    let rows = parse_pockettube(&text);
+    if rows.is_empty() {
+        return Err(anyhow!("No PocketTube rows found (expected Title,Link,Subscribers,Groups)"));
+    }
+    const COLORS: [u32; 6] = [0x3ea6ff, 0xff4e45, 0x2ba640, 0xffa000, 0xab47bc, 0x26c6da];
+    let mut by_name: HashMap<String, i64> = store::profiles().into_iter().map(|p| (p.name, p.id)).collect();
+    let (mut profiles, mut channels) = (0usize, 0usize);
+    for (id, title, groups) in rows {
+        if groups.is_empty() {
+            continue;
+        }
+        store::subscribe(&id, &title, None);
+        for group in groups {
+            let pid = match by_name.get(&group) {
+                Some(pid) => *pid,
+                None => {
+                    let pid = store::create_profile(&group, COLORS[by_name.len() % COLORS.len()]);
+                    by_name.insert(group.clone(), pid);
+                    profiles += 1;
+                    pid
+                }
+            };
+            store::set_profile_channel(pid, &id, true);
+            channels += 1;
+        }
+    }
+    Ok(format!("Imported {profiles} profiles ({channels} channel links)"))
+}
+
+/// Pulls `(channel_id, title, groups)` out of a PocketTube CSV.
+fn parse_pockettube(text: &str) -> Vec<(String, String, Vec<String>)> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let Some(header) = lines.next() else { return Vec::new() };
+    let cols: Vec<String> = split_csv(header).into_iter().map(|c| c.trim().to_lowercase()).collect();
+    let index = |names: &[&str]| cols.iter().position(|c| names.contains(&c.as_str()));
+    let (Some(link), Some(title)) = (index(&["link", "url"]), index(&["title", "name", "channel title"])) else {
+        return Vec::new();
+    };
+    let groups = index(&["groups", "group"]);
+    let mut out = Vec::new();
+    for line in lines {
+        let cols = split_csv(line);
+        let Some(id) = cols.get(link).and_then(|u| channel_id_from_url(u)) else { continue };
+        let name = cols
+            .get(title)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| id.clone());
+        let groups = groups
+            .and_then(|g| cols.get(g))
+            .map(|g| g.split([';', ',']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default();
+        out.push((id, name, groups));
+    }
     out
 }
 
@@ -349,5 +413,19 @@ mod tests {
     fn csv_split() {
         assert_eq!(split_csv("a,\"b, c\",d"), vec!["a", "b, c", "d"]);
         assert_eq!(channel_id_from_url("http://www.youtube.com/channel/UCsBjURrPoezykLs9EqgamOA"), Some("UCsBjURrPoezykLs9EqgamOA".into()));
+    }
+
+    #[test]
+    fn pockettube_groups() {
+        let csv = "Title,Link,Subscribers,Groups\n\
+            \"A\",\"https://www.youtube.com/channel/UCsBjURrPoezykLs9EqgamOA\",\"1\",\"Music\"\n\
+            \"B\",\"https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw\",\"2\",\"\"\n\
+            \"C\",\"https://www.youtube.com/channel/UClXM8ZhlOxdlwJUlNxsEoAQ\",\"3\",\"POE2, Games\"\n";
+        let rows = parse_pockettube(csv);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, "UCsBjURrPoezykLs9EqgamOA");
+        assert_eq!(rows[0].2, vec!["Music"]);
+        assert!(rows[1].2.is_empty());
+        assert_eq!(rows[2].2, vec!["POE2", "Games"]);
     }
 }

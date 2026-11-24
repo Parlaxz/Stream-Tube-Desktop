@@ -2,7 +2,7 @@ use crate::api::innertube;
 use crate::api::json::compact_number;
 use crate::api::services::{self, Votes};
 use crate::api::types::*;
-use crate::player::controller::{PlayerEvent, player};
+use crate::player::controller::{Player, PlayerEvent, player};
 use crate::store;
 use crate::ui::app::{AutoplayNext, MenuItem, Route, UiState, navigate, open_menu};
 use crate::ui::cards::*;
@@ -30,6 +30,8 @@ const CHAT_KEEP: usize = 250;
 
 pub struct WatchPage {
     id: String,
+    /// The tab's own player, so a parked page keeps updating the right engine.
+    player: Entity<Player>,
     playlist_id: Option<String>,
     info: Load<WatchInfo>,
     votes: Option<Votes>,
@@ -82,8 +84,8 @@ fn jump_to(t: f64, window: &mut Window, cx: &mut App) {
 
 impl WatchPage {
     pub fn new(id: String, playlist_id: Option<String>, start: Option<f64>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let pl = player(cx);
-        let sub = cx.subscribe(&pl, |this: &mut Self, _, ev: &PlayerEvent, cx| {
+        let player = player(cx);
+        let sub = cx.subscribe(&player, |this: &mut Self, _, ev: &PlayerEvent, cx| {
             match ev {
                 PlayerEvent::Ended => this.on_ended(cx),
                 PlayerEvent::Ambient => cx.notify(),
@@ -96,10 +98,10 @@ impl WatchPage {
             let name = store::playlists().into_iter().find(|p| p.id == lp).map(|p| p.name).unwrap_or_default();
             local_playlist = Some((lp, name, store::playlist_items(lp)));
         }
-        let playing = pl.read(cx).video.as_ref().map(|v| v.id.clone());
+        let playing = player.read(cx).video.as_ref().map(|v| v.id.clone());
         if playing.as_deref() != Some(id.as_str()) {
             let stub = VideoItem { id: id.clone(), thumbnail: innertube::default_thumb(&id), ..Default::default() };
-            pl.update(cx, |p, cx| {
+            player.update(cx, |p, cx| {
                 // keep queue if this video is in it
                 if let Some(pos) = p.queue.iter().position(|v| v.id == id) {
                     p.queue_pos = Some(pos);
@@ -113,11 +115,12 @@ impl WatchPage {
                 p.play(stub, start, cx);
             });
         } else if let Some(t) = start {
-            pl.update(cx, |p, _| p.seek_to(t));
+            player.update(cx, |p, _| p.seek_to(t));
         }
         cx.set_global(AutoplayNext(None));
         let mut s = Self {
             id,
+            player,
             playlist_id,
             info: Load::Loading,
             votes: None,
@@ -394,7 +397,7 @@ impl WatchPage {
                 match info {
                     Ok(w) => {
                         let s = store::settings_snapshot();
-                        let pl = player(cx);
+                        let pl = this.player.clone();
                         let chapters = w.chapters.clone();
                         let heatmap = w.heatmap.clone();
                         let full = VideoItem {
@@ -470,7 +473,7 @@ impl WatchPage {
     fn on_ended(&mut self, cx: &mut Context<Self>) {
         let s = store::settings_snapshot();
         let next = cx.global::<AutoplayNext>().0.clone().filter(|_| s.autoplay_next);
-        let looping = player(cx).read(cx).loop_video;
+        let looping = self.player.read(cx).loop_video;
         if next.is_none() && !looping && s.exit_fullscreen_at_end && cx.global::<UiState>().fullscreen {
             if let Some(w) = cx.active_window() {
                 let _ = w.update(cx, |_, window, cx| crate::ui::app::toggle_fullscreen(window, cx));
@@ -482,10 +485,11 @@ impl WatchPage {
         if let Some(v) = next {
             toast(cx, format!("Up next: {}", v.title));
             let id = v.id.clone();
+            let pl = self.player.clone();
             cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
                 let _ = cx.update(|cx| {
-                    let still_ended = player(cx).read(cx).eof;
+                    let still_ended = pl.read(cx).eof && player(cx) == pl;
                     if still_ended {
                         if let Some(w) = cx.active_window() {
                             let _ = w.update(cx, |_, window, cx| navigate(Route::Watch { id, playlist: None, start: None }, window, cx));
@@ -515,7 +519,7 @@ impl WatchPage {
                     if !this.comment_timed {
                         return false;
                     }
-                    let now = player(cx).read(cx).time;
+                    let now = this.player.read(cx).time;
                     let shown = this.stamped().iter().filter(|(t, _)| *t <= now + 0.5).count();
                     if shown != this.timed_shown {
                         this.timed_shown = shown;
@@ -642,7 +646,7 @@ impl WatchPage {
             .unwrap_or_else(|| "Like".into());
         let dislikes = dislike_n.map(vote_count);
         let ratio = like_n.zip(dislike_n).filter(|(l, d)| l + d > 0).map(|(l, d)| l as f32 / (l + d) as f32);
-        let video_item = player(cx).read(cx).video.clone().unwrap_or_else(|| VideoItem { id: w.id.clone(), title: w.title.clone(), ..Default::default() });
+        let video_item = self.player.read(cx).video.clone().unwrap_or_else(|| VideoItem { id: w.id.clone(), title: w.title.clone(), ..Default::default() });
         let cid = w.channel.id.clone();
         let title = if s.dearrow_titles {
             services::branding_cached(&w.id).flatten().and_then(|b| b.title).unwrap_or(w.title.clone())
@@ -1042,6 +1046,7 @@ impl WatchPage {
 
     fn render_comments(&mut self, w: &WatchInfo, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
+        let pl = self.player.clone();
         if store::settings_snapshot().hide_comments {
             return div().into_any_element();
         }
@@ -1092,7 +1097,7 @@ impl WatchPage {
         if timed {
             // like youtube.com: a comment shows up once the video reaches the moment
             // it's about, the latest one on top
-            let now = player(cx).read(cx).time;
+            let now = self.player.read(cx).time;
             let stamped = self.stamped();
             let total = stamped.len();
             let mut reached: Vec<(f64, Comment)> = stamped.into_iter().filter(|(t, _)| *t <= now + 0.5).collect();
@@ -1135,12 +1140,15 @@ impl WatchPage {
                                 .text_color(p.link)
                                 .cursor_pointer()
                                 .child(crate::api::json::format_duration(*t as u64))
-                                .on_click(move |_, _, cx| {
-                                    player(cx).update(cx, |p, cx| {
-                                        p.seek_to(t2);
-                                        p.set_paused(false);
-                                        cx.notify();
-                                    })
+                                .on_click({
+                                    let pl = pl.clone();
+                                    move |_, _, cx| {
+                                        pl.update(cx, |p, cx| {
+                                            p.seek_to(t2);
+                                            p.set_paused(false);
+                                            cx.notify();
+                                        })
+                                    }
                                 }),
                         )
                         .child(div().flex_1().min_w_0().child(self.render_comment(c, false, cx))),
@@ -1161,7 +1169,7 @@ impl WatchPage {
     /// each a click away.
     fn render_chapters_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (chapters, now) = {
-            let r = player(cx).read(cx);
+            let r = self.player.read(cx);
             (r.chapters.clone(), r.time)
         };
         if !chapters_open() || chapters.len() < 2 || store::settings_snapshot().hide_chapters {
@@ -1174,7 +1182,7 @@ impl WatchPage {
             self.chapters_ticker = Some(cx.spawn(async move |this, cx| loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
                 let alive = this.update(cx, |this, cx| {
-                    let r = player(cx).read(cx);
+                    let r = this.player.read(cx);
                     let cur = r.chapters.iter().rposition(|c| c.start <= r.time + 0.01);
                     if cur != this.chapters_shown {
                         cx.notify();
@@ -1267,7 +1275,7 @@ impl WatchPage {
 
     fn render_queue_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = pal(cx);
-        let pl = player(cx);
+        let pl = self.player.clone();
         let (queue, pos) = {
             let r = pl.read(cx);
             (r.queue.clone(), r.queue_pos)
@@ -1499,7 +1507,7 @@ impl Render for WatchPage {
             .children(related);
         // ambient mode: a soft glow in the picture's colours around the player
         let glow = (!ui.theater && store::settings_snapshot().ambient_mode)
-            .then(|| crate::player::controller::player(cx).read(cx).ambient)
+            .then(|| self.player.read(cx).ambient)
             .flatten()
             .map(|c| {
                 let mut h: Hsla = c.into();

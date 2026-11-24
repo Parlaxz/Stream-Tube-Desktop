@@ -472,10 +472,10 @@ fn launch_external(id: &str, time: f64, custom: &str) -> anyhow::Result<String> 
     let info = streams::get_streams(id)?;
     let s = store::settings_snapshot();
     // H.264 + AAC plays in every player
-    let (v, a) = streams::pick_formats(&info, s.default_quality, "h264", None);
+    let (v, a) = streams::pick_formats(&info, s.default_quality, s.preferred_fps, "h264", None);
     let local = |f: &crate::api::types::StreamFormat| crate::player::proxy::local_url(&f.url, f.content_length, &f.mime);
     let live = info.is_live || (info.video.is_empty() && info.muxed.is_empty());
-    let hls = info.hls_url.as_deref().map(|u| crate::player::proxy::local_hls(u, s.default_quality, None));
+    let hls = info.hls_url.as_deref().map(|u| crate::player::proxy::local_hls(u, s.default_quality, s.preferred_fps, None));
     let (video, audio) = if live || info.hls_only {
         (hls.clone().ok_or_else(|| anyhow::anyhow!("no stream for this video"))?, None)
     } else {
@@ -541,7 +541,7 @@ fn launch_external(id: &str, time: f64, custom: &str) -> anyhow::Result<String> 
 fn open_with_default(info: &crate::api::types::StreamInfo, start: Option<u64>) -> anyhow::Result<String> {
     let s = store::settings_snapshot();
     let url = if info.is_live || info.hls_only {
-        info.hls_url.as_deref().map(|u| crate::player::proxy::local_hls(u, s.default_quality, None))
+        info.hls_url.as_deref().map(|u| crate::player::proxy::local_hls(u, s.default_quality, s.preferred_fps, None))
     } else {
         info.muxed.last().map(|m| crate::player::proxy::local_url(&m.url, m.content_length, &m.mime))
     }

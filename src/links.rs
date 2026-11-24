@@ -33,6 +33,12 @@ fn port_file() -> std::path::PathBuf {
     crate::store::data_dir().join("instance")
 }
 
+/// Drops the running-instance marker so a relaunched copy starts as the primary
+/// one instead of handing over to this process and exiting.
+pub fn forget_instance() {
+    let _ = std::fs::remove_file(port_file());
+}
+
 /// Hands `arg` to an already running instance. True when one took it (this process should exit).
 pub fn forward_to_running(arg: &str) -> bool {
     let Ok(s) = std::fs::read_to_string(port_file()) else { return false };

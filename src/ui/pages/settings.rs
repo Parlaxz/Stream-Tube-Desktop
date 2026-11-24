@@ -8,6 +8,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 enum Section {
     General,
     Player,
+    Quality,
+    Custom,
     Premium,
     Tweaks,
     SponsorBlock,
@@ -23,6 +25,8 @@ enum Section {
 const SECTIONS: &[(Section, &str, &str)] = &[
     (Section::General, "General", "palette"),
     (Section::Player, "Player", "circle-play"),
+    (Section::Quality, "Quality", "gauge"),
+    (Section::Custom, "Custom Features", "keyboard"),
     (Section::Premium, "Premium features", "sparkles"),
     (Section::Tweaks, "Tweaks", "sliders-horizontal"),
     (Section::SponsorBlock, "SponsorBlock & DeArrow", "shield-check"),
@@ -72,6 +76,14 @@ impl SettingsPage {
             ("captions_lang", s.captions_lang.clone(), "en", |s, v| s.captions_lang = v),
             ("sb_min", format!("{}", s.sb_min_duration), "0", |s, v| s.sb_min_duration = v.parse().unwrap_or(0.0)),
             ("sb_user_id", s.sb_user_id.clone(), "Paste your private user ID", |s, v| s.sb_user_id = v),
+            ("speed_up_key", s.speed_up_key.to_uppercase(), "D", |s, v| s.speed_up_key = v.trim().to_lowercase()),
+            ("speed_up_step", format!("{}", s.speed_up_step), "0.25", |s, v| s.speed_up_step = v.parse().unwrap_or(0.25)),
+            ("speed_down_key", s.speed_down_key.to_uppercase(), "S", |s, v| s.speed_down_key = v.trim().to_lowercase()),
+            ("speed_down_step", format!("{}", s.speed_down_step), "0.25", |s, v| s.speed_down_step = v.parse().unwrap_or(0.25)),
+            ("speed_reset_key", s.speed_reset_key.to_uppercase(), "R", |s, v| s.speed_reset_key = v.trim().to_lowercase()),
+            ("read_ahead", format!("{}", s.read_ahead_mb), "96", |s, v| s.read_ahead_mb = v.parse::<u32>().unwrap_or(96).min(4096)),
+            ("read_ahead_back", format!("{}", s.read_ahead_back_mb), "24", |s, v| s.read_ahead_back_mb = v.parse::<u32>().unwrap_or(24).min(4096)),
+            ("default_speed", format!("{}", s.default_speed), "1.0", |s, v| s.default_speed = v.parse::<f64>().unwrap_or(1.0).clamp(0.1, 5.0)),
         ];
         let mut inputs = Vec::new();
         let mut subs = Vec::new();
@@ -86,6 +98,10 @@ impl SettingsPage {
                     let v = st.read(cx).value().trim().to_string();
                     let changed = key == "sb_user_id" && v != store::settings_snapshot().sb_user_id;
                     store::update_settings(|s| setter(s, v));
+                    if matches!(key, "read_ahead" | "read_ahead_back") {
+                        // reach the active player and every parked tab's player
+                        crate::player::controller::apply_read_ahead(cx);
+                    }
                     if changed {
                         this.load_sb_stats(cx);
                     }
@@ -397,6 +413,19 @@ fn text_field(st: &Entity<InputState>, w: f32, cx: &App) -> impl IntoElement {
     div().w(px(w)).px_3().py_1().rounded_lg().border_1().border_color(p.border).bg(p.bg).child(Input::new(st).appearance(false))
 }
 
+/// A shortcut key box followed by its step amount box.
+fn key_step(key: &Entity<InputState>, step: &Entity<InputState>, cx: &App) -> Div {
+    let p = pal(cx);
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().text_xs().text_color(p.text2).child("Key"))
+        .child(text_field(key, 56., cx))
+        .child(div().text_xs().text_color(p.text2).child("Step"))
+        .child(text_field(step, 72., cx))
+}
+
 impl SettingsPage {
     /// The right control for a choice: inline buttons for up to 3 options, a dropdown above that.
     fn choice<T: PartialEq + Clone + 'static>(&self, id: &'static str, options: &[(T, &str)], cur: T, set: fn(&mut Settings, T), cx: &mut Context<Self>) -> AnyElement {
@@ -506,6 +535,109 @@ impl SettingsPage {
         self.select(id, label, 280., items, set, cx)
     }
 
+    fn custom(&self, cx: &mut Context<Self>) -> Div {
+        let s = store::settings_snapshot();
+        let p = pal(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(
+                card(cx)
+                    .child(row("Default speed", "Speed at which videos start, and what Reset speed returns to", text_field(&self.input("default_speed"), 80., cx), cx))
+                    .child(row(
+                        "Increase speed",
+                        "Key and amount to raise the playback speed each press",
+                        key_step(&self.input("speed_up_key"), &self.input("speed_up_step"), cx),
+                        cx,
+                    ))
+                    .child(row(
+                        "Decrease speed",
+                        "Key and amount to lower the playback speed each press",
+                        key_step(&self.input("speed_down_key"), &self.input("speed_down_step"), cx),
+                        cx,
+                    ))
+                    .child(row("Reset speed", "Key to return to 1x", text_field(&self.input("speed_reset_key"), 72., cx), cx)),
+            )
+            .child(
+                card(cx)
+                    .child(
+                        div()
+                            .pt_2()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.text)
+                            .child("Read ahead"),
+                    )
+                    .child(row(
+                        "Forward buffer",
+                        "Video kept ready past the playhead, in MiB. Bigger values let a video tab resume without downloading again",
+                        text_field(&self.input("read_ahead"), 96., cx),
+                        cx,
+                    ))
+                    .child(row(
+                        "Back buffer",
+                        "Already-played video kept in memory, in MiB. Used when you seek back or return to a tab",
+                        text_field(&self.input("read_ahead_back"), 96., cx),
+                        cx,
+                    ))
+                    .child(div().pb_2().pt_1().text_xs().text_color(p.text2).child("Each open video tab keeps its own buffer in memory.")),
+            )
+            .child(
+                card(cx)
+                    .child(
+                        div()
+                            .pt_2()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.text)
+                            .child("Subscription profiles"),
+                    )
+                    .child(row(
+                        "Refresh time",
+                        "Reload a profile's feed when its cached videos are older than this",
+                        self.choice(
+                            "profile-refresh",
+                            &[
+                                (15u32, "15 minutes"),
+                                (30u32, "30 minutes"),
+                                (60u32, "1 hour"),
+                                (180u32, "3 hours"),
+                                (360u32, "6 hours"),
+                                (1440u32, "24 hours"),
+                            ],
+                            s.profile_refresh_min,
+                            |s, v| s.profile_refresh_min = v,
+                            cx,
+                        ),
+                        cx,
+                    ))
+                    .child(row(
+                        "Import profiles",
+                        "PocketTube subscriptions CSV (Title, Link, Subscribers, Groups)",
+                        pill("imp-profiles", Some("upload"), "Choose file…", cx).on_click(|_, _, cx| {
+                            let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Import profiles".into()) });
+                            cx.spawn(async move |cx| {
+                                if let Ok(Ok(Some(paths))) = rx.await {
+                                    for path in paths {
+                                        let res = blocking(move || crate::import::import_profiles(&path)).await;
+                                        let _ = cx.update(|cx| {
+                                            match res {
+                                                Ok(msg) => toast(cx, msg),
+                                                Err(e) => toast(cx, format!("Profile import failed: {e}")),
+                                            }
+                                            cx.refresh_windows();
+                                        });
+                                    }
+                                }
+                            })
+                            .detach();
+                        }),
+                        cx,
+                    )),
+            )
+    }
+
     fn premium(&self, cx: &mut Context<Self>) -> Div {
         let s = store::settings_snapshot();
         let p = pal(cx);
@@ -548,7 +680,6 @@ impl SettingsPage {
         card(cx)
             .child(row("Shorts: play next automatically", "Move to the next Short when one ends", switch("sha", s.shorts_autoadvance, |s, v| s.shorts_autoadvance = v, cx), cx))
             .child(row("Open Shorts in the regular player", "", switch("shp", s.shorts_in_player, |s, v| s.shorts_in_player = v, cx), cx))
-            .child(row("Remember last quality", "Use the quality you picked last as the default", switch("rq", s.remember_quality, |s, v| s.remember_quality = v, cx), cx))
             .child(row("Double-click for fullscreen", "", switch("dcf", s.double_click_fullscreen, |s, v| s.double_click_fullscreen = v, cx), cx))
             .child(row("Exit fullscreen when a video ends", "", switch("efe", s.exit_fullscreen_at_end, |s, v| s.exit_fullscreen_at_end = v, cx), cx))
             .child(row(
@@ -604,12 +735,6 @@ impl SettingsPage {
     fn player(&self, cx: &mut Context<Self>) -> Div {
         let s = store::settings_snapshot();
         card(cx)
-            .child(row(
-                "Default quality",
-                "Maximum resolution to start videos at",
-                self.choice("q", &[(2160u32, "4K"), (1440, "1440p"), (1080, "1080p"), (720, "720p"), (480, "480p"), (360, "360p")], s.default_quality, |s, v| s.default_quality = v, cx),
-                cx,
-            ))
             .child(row("Preferred codec", "", self.choice("codec", &[("vp9".to_string(), "VP9"), ("av1".to_string(), "AV1"), ("h264".to_string(), "H.264")], s.codec_pref.clone(), |s, v| s.codec_pref = v, cx), cx))
             .child(row("Default speed", "", self.choice("speed", &[(0.75f64, "0.75x"), (1.0, "1x"), (1.25, "1.25x"), (1.5, "1.5x"), (1.75, "1.75x"), (2.0, "2x")], s.default_speed, |s, v| s.default_speed = v, cx), cx))
             .child(row("Remember speed per channel", "", switch("rsp", s.remember_speed_per_channel, |s, v| s.remember_speed_per_channel = v, cx), cx))
@@ -662,6 +787,30 @@ impl SettingsPage {
                 cx,
             ))
 
+    }
+
+    fn quality(&self, cx: &mut Context<Self>) -> Div {
+        let s = store::settings_snapshot();
+        card(cx)
+            .child(row(
+                "Default quality",
+                "Maximum resolution to start videos at",
+                self.choice("q", &[(2160u32, "4K"), (1440, "1440p"), (1080, "1080p"), (720, "720p"), (480, "480p"), (360, "360p")], s.default_quality, |s, v| s.default_quality = v, cx),
+                cx,
+            ))
+            .child(row(
+                "Preferred frame rate",
+                "Which rate to use when a resolution offers both, e.g. 1080p60 and 1080p30",
+                self.choice("fps", &[(0u32, "Highest"), (60, "60 fps"), (30, "30 fps")], s.preferred_fps, |s, v| s.preferred_fps = v, cx),
+                cx,
+            ))
+            .child(row(
+                "List frame rates separately",
+                "Show 1080p60 and 1080p30 as separate choices in the player's quality menu. Off groups them by resolution",
+                switch("qv", s.quality_variants, |s, v| s.quality_variants = v, cx),
+                cx,
+            ))
+            .child(row("Remember last quality", "Use the quality you picked last as the default", switch("rq", s.remember_quality, |s, v| s.remember_quality = v, cx), cx))
     }
 
     fn sponsorblock(&self, cx: &mut Context<Self>) -> Div {
@@ -1080,6 +1229,7 @@ impl SettingsPage {
     }
 
     fn about(&self, cx: &mut Context<Self>) -> Div {
+        let s = store::settings_snapshot();
         let mpv = crate::player::mpv::available();
         card(cx)
             .child(row("Stream Tube", &format!("Version {}", env!("CARGO_PKG_VERSION")), div(), cx))
@@ -1089,7 +1239,7 @@ impl SettingsPage {
                 use crate::updater::Status;
                 let status = cx.default_global::<crate::updater::Updates>().status.clone();
                 let text = match &status {
-                    Status::Idle => "Updates are manual in this fork".to_string(),
+                    Status::Idle => "Pre-releases included".to_string(),
                     Status::Checking => "Checking…".to_string(),
                     Status::UpToDate => "You have the latest version".to_string(),
                     Status::Available(r) => format!("{} is available", r.name),
@@ -1102,7 +1252,7 @@ impl SettingsPage {
                 };
                 row("Updates", &text, btn, cx)
             })
-            .child(row("Automatic updates", "Disabled in this fork; see UPSTREAM_SYNC.md to update manually", div(), cx))
+            .child(row("Check for updates at startup", "", switch("upd-auto", s.check_updates, |s, v| s.check_updates = v, cx), cx))
             .child(row("Releases", "Changelog and downloads on GitHub", pill("upd-page", Some("external-link"), "Open", cx).on_click(|_, _, _| {
                 let _ = open::that(crate::updater::RELEASES_PAGE);
             }), cx))
@@ -1192,6 +1342,8 @@ impl Render for SettingsPage {
         let render_section = |this: &Self, sec: Section, cx: &mut Context<Self>| match sec {
             Section::General => this.general(cx),
             Section::Player => this.player(cx),
+            Section::Quality => this.quality(cx),
+            Section::Custom => this.custom(cx),
             Section::Premium => this.premium(cx),
             Section::Tweaks => this.tweaks(cx),
             Section::SponsorBlock => this.sponsorblock(cx),
@@ -1219,6 +1371,8 @@ impl Render for SettingsPage {
         let content = match self.section {
             Section::General => self.general(cx),
             Section::Player => self.player(cx),
+            Section::Quality => self.quality(cx),
+            Section::Custom => self.custom(cx),
             Section::Premium => self.premium(cx),
             Section::Tweaks => self.tweaks(cx),
             Section::SponsorBlock => self.sponsorblock(cx),

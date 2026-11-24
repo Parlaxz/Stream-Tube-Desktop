@@ -562,6 +562,23 @@ pub fn my_playlists() -> Result<Vec<PlaylistItem>> {
     Ok(out)
 }
 
+/// Adds a video to one of the signed-in account's playlists.
+pub fn playlist_add(playlist_id: &str, video_id: &str) -> Result<()> {
+    let r = tv_call(
+        "browse/edit_playlist",
+        json!({
+            "playlistId": playlist_id,
+            "actions": [{ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }]
+        }),
+    )?;
+    if let Some(status) = r.get("status").and_then(Value::as_str)
+        && !status.contains("SUCCEEDED")
+    {
+        return Err(anyhow!("{status}"));
+    }
+    Ok(())
+}
+
 /// A playlist as the signed-in account sees it (works for private / unlisted ones).
 pub fn playlist(playlist_id: &str) -> Result<PlaylistPage> {
     let r = tv_call("browse", json!({ "browseId": format!("VL{playlist_id}") }))?;

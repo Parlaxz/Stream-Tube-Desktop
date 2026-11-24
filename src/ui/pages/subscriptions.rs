@@ -27,10 +27,10 @@ pub struct FeedPage {
 }
 
 impl FeedPage {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(profile: Option<i64>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut s = Self {
             videos: Vec::new(),
-            profile: None,
+            profile,
             kind: Kind::All,
             refreshing: false,
             progress: Arc::new((AtomicUsize::new(0), AtomicUsize::new(0))),
@@ -39,11 +39,26 @@ impl FeedPage {
             shown: 60,
         };
         s.load_cached();
-        let stale = s.last_updated.map(|t| crate::api::json::now() - t > 30 * 60).unwrap_or(true);
-        if crate::api::auth::signed_in() || (stale && !store::subscriptions().is_empty()) {
+        // A profile opened from the sidebar loads fresh; otherwise only when stale.
+        let stale = s.stale();
+        if profile.is_some() || crate::api::auth::signed_in() || (stale && !store::subscriptions().is_empty()) {
             s.refresh(cx);
         }
         s
+    }
+
+    /// True when the current profile's cached feed is older than the refresh time.
+    fn stale(&self) -> bool {
+        let mins = store::settings_snapshot().profile_refresh_min.max(1) as i64;
+        self.last_updated.map(|t| crate::api::json::now() - t > mins * 60).unwrap_or(true)
+    }
+
+    /// A profile chip was picked: reload only when its cache is old.
+    fn maybe_refresh(&mut self, cx: &mut Context<Self>) {
+        let empty = self.filter().map(|f| f.is_empty()).unwrap_or(false);
+        if !empty && self.stale() {
+            self.refresh(cx);
+        }
     }
 
     fn filter(&self) -> Option<Vec<String>> {
@@ -145,6 +160,7 @@ impl Render for FeedPage {
         let mut bar = div().flex().items_center().gap_2().flex_wrap().child(chip("pf-all", "All channels", self.profile.is_none(), cx).on_click(cx.listener(|t, _, _, cx| {
             t.profile = None;
             t.load_cached();
+            t.maybe_refresh(cx);
             cx.notify();
         })));
         for pr in &profiles {
@@ -152,6 +168,7 @@ impl Render for FeedPage {
             bar = bar.child(chip(SharedString::from(format!("pf-{id}")), pr.name.clone(), self.profile == Some(id), cx).on_click(cx.listener(move |t, _, _, cx| {
                 t.profile = Some(id);
                 t.load_cached();
+                t.maybe_refresh(cx);
                 cx.notify();
             })));
         }

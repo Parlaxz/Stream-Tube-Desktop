@@ -1,6 +1,6 @@
 //! Picture-in-picture: the player in a small always-on-top window that stays
 //! visible over other apps.
-use crate::player::controller::player;
+use crate::player::controller::{Player, player};
 use crate::player::view::PlayerView;
 use crate::ui::*;
 
@@ -14,6 +14,17 @@ pub struct PipView {
 
 pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
     cx.try_global::<PipWindow>().and_then(|p| p.0)
+}
+
+/// Keeps picture-in-picture on the tab that is active after a tab switch.
+pub fn follow(player: Entity<Player>, cx: &mut App) {
+    let Some(h) = handle(cx) else { return };
+    let _ = h.update(cx, |root: gpui_kit::AnyView, _, cx| {
+        let Ok(pip) = root.downcast::<PipView>() else { return };
+        pip.update(cx, |view, cx| {
+            view.view.update(cx, |v, cx| v.set_player(player, cx));
+        });
+    });
 }
 
 pub fn open(cx: &mut App) {

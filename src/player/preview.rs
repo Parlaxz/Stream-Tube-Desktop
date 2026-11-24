@@ -254,12 +254,12 @@ impl Preview {
 
     fn start(&mut self, info: &crate::api::types::StreamInfo, cx: &mut Context<Self>) {
         let src = if info.hls_only {
-            info.hls_url.as_deref().map(|u| crate::player::proxy::local_hls(u, 360, None))
+            info.hls_url.as_deref().map(|u| crate::player::proxy::local_hls(u, 360, 0, None))
         } else if info.is_live || (info.video.is_empty() && info.muxed.is_empty()) {
             info.hls_url.clone()
         } else {
             let codec = store::settings_snapshot().codec_pref.clone();
-            let (v, _) = streams::pick_formats(info, 360, &codec, None);
+            let (v, _) = streams::pick_formats(info, 360, 0, &codec, None);
             match v {
                 Some(v) => streams::mpv_source(Some(v), None, info.length_secs),
                 None => info.muxed.first().map(|m| m.url.clone()),

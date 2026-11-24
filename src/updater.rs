@@ -1,4 +1,4 @@
-//! In-app updates from the project's GitHub releases (pre-releases included).
+//! In-app updates from this fork's GitHub releases (pre-releases included).
 use crate::api::http;
 use crate::store;
 use crate::ui::{blocking, toast};
@@ -7,12 +7,12 @@ use anyhow::{Context as _, Result, anyhow};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const REPO: &str = "Avaneesh-Inamdar/Stream-Tube-Desktop";
-pub const RELEASES_PAGE: &str = "https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/releases";
+const REPO: &str = "Parlaxz/Stream-Tube-Desktop";
+pub const RELEASES_PAGE: &str = "https://github.com/Parlaxz/Stream-Tube-Desktop/releases";
 
-/// This fork updates manually (see `UPSTREAM_SYNC.md`), so upstream installers
-/// must never replace the customized build. Checking is still allowed.
-pub const BINARY_UPDATER_ENABLED: bool = false;
+/// Updates come from this fork only. Never point this at the upstream repo:
+/// its installers would replace the customized build.
+pub const BINARY_UPDATER_ENABLED: bool = true;
 
 #[derive(Clone, Debug)]
 pub struct Release {

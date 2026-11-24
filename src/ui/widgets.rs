@@ -148,6 +148,12 @@ fn smooth_scroll(id: &'static str, handle: ScrollHandle) -> impl IntoElement {
                     handle.set_offset(point(handle.offset().x, px(st.shown)));
                 }
             });
+            // the page on screen drives middle-click autoscroll, in this same
+            // prepaint, so the frame is requested on the page and its scroll
+            // position is re-laid-out (a refresh alone would reuse the cache)
+            if autoscroll_advance() {
+                window.request_animation_frame();
+            }
         },
         move |_, _, window, _| {
             window.on_mouse_event(move |ev: &ScrollEvent, phase, _, _| {
@@ -171,6 +177,113 @@ fn smooth_scroll(id: &'static str, handle: ScrollHandle) -> impl IntoElement {
 /// along with (or instead of) the list the pointer is over.
 pub fn nested_scroll(id: impl Into<ElementId>, list: impl IntoElement) -> Stateful<Div> {
     div().id(id).on_scroll(|_, _, cx| cx.stop_propagation()).child(list)
+}
+
+// ───────────────────────── middle-click autoscroll ─────────────────────────
+
+thread_local! {
+    static AUTOSCROLL: std::cell::RefCell<Option<AutoScroll>> = const { std::cell::RefCell::new(None) };
+}
+
+struct AutoScroll {
+    anchor: Point<Pixels>,
+    pointer: Point<Pixels>,
+    handle: ScrollHandle,
+    last: std::time::Instant,
+}
+
+fn autoscroll_active() -> bool {
+    AUTOSCROLL.with(|a| a.borrow().is_some())
+}
+
+fn autoscroll_start(position: Point<Pixels>) -> bool {
+    let Some((_, handle)) = ACTIVE_PAGE.with(|a| a.borrow().clone()) else { return false };
+    if !handle.bounds().contains(&position) || handle.max_offset().y <= px(0.) {
+        return false;
+    }
+    AUTOSCROLL.with(|a| {
+        *a.borrow_mut() = Some(AutoScroll { anchor: position, pointer: position, handle, last: std::time::Instant::now() })
+    });
+    true
+}
+
+fn autoscroll_stop() {
+    AUTOSCROLL.with(|a| *a.borrow_mut() = None);
+}
+
+/// Autoscroll speed in pixels per second for a pointer `dy` pixels from the
+/// anchor; positive means down. Zero inside the dead zone.
+fn autoscroll_speed(dy: f32) -> f32 {
+    /// no scrolling closer than this to the anchor, like a browser's dead zone
+    const DEAD_ZONE: f32 = 18.0;
+    /// pixels per second of scroll per pixel away from the anchor
+    const SPEED: f32 = 6.5;
+    const MAX_SPEED: f32 = 2000.0;
+    let d = (dy.abs() - DEAD_ZONE).max(0.0);
+    (d * SPEED).min(MAX_SPEED) * dy.signum()
+}
+
+/// Moves the page a little if a middle-click autoscroll is active. Returns true
+/// while it is still moving, so the page keeps animating.
+fn autoscroll_advance() -> bool {
+    AUTOSCROLL.with(|a| {
+        let mut a = a.borrow_mut();
+        let Some(s) = a.as_mut() else { return false };
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(s.last).as_secs_f32().min(0.05);
+        s.last = now;
+        let dy: f32 = (s.pointer.y - s.anchor.y).into();
+        let speed = autoscroll_speed(dy);
+        if speed == 0.0 {
+            return false;
+        }
+        let step = speed * dt;
+        let max: f32 = s.handle.max_offset().y.into();
+        let cur: f32 = s.handle.offset().y.into();
+        let next = (cur - step).clamp(-max.max(0.0), 0.0);
+        if (next - cur).abs() > 0.01 {
+            s.handle.set_offset(point(s.handle.offset().x, px(next)));
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Browser-style autoscroll: a middle click in a page starts it, moving the
+/// pointer scrolls by distance and direction from that click, and any other
+/// click stops it. Draw this once in the app shell; the page's scroll area then
+/// animates it.
+pub fn autoscroll_layer() -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        |_, _, window, _| {
+            window.on_mouse_event(|ev: &MouseMoveEvent, phase, window, _| {
+                if phase == DispatchPhase::Capture && autoscroll_active() {
+                    AUTOSCROLL.with(|a| {
+                        if let Some(s) = a.borrow_mut().as_mut() {
+                            s.pointer = ev.position;
+                        }
+                    });
+                    window.refresh();
+                }
+            });
+            window.on_mouse_event(|ev: &MouseDownEvent, phase, window, _| match phase {
+                DispatchPhase::Capture if ev.button != MouseButton::Middle => autoscroll_stop(),
+                DispatchPhase::Bubble if ev.button == MouseButton::Middle => {
+                    if autoscroll_active() {
+                        autoscroll_stop();
+                    } else if autoscroll_start(ev.position) {
+                        window.refresh();
+                    }
+                }
+                _ => {}
+            });
+            window.on_mouse_event(|_: &MouseExitEvent, _, _, _| autoscroll_stop());
+        },
+    )
+    .absolute()
+    .size_0()
 }
 
 /// True when the scroll position is within `margin` of the bottom, or when the
@@ -484,6 +597,19 @@ b…"));
         assert!(c.chars().count() <= 401 && c.ends_with("word…"));
         // multi-byte text is cut on a char boundary
         assert!(clamp_text(&"é".repeat(500), 5, 400).is_some());
+    }
+}
+
+#[cfg(test)]
+mod autoscroll_tests {
+    use super::autoscroll_speed;
+    #[test]
+    fn speed_grows_with_distance_and_follows_direction() {
+        assert_eq!(autoscroll_speed(0.0), 0.0);
+        assert_eq!(autoscroll_speed(10.0), 0.0);
+        assert!(autoscroll_speed(100.0) > 0.0);
+        assert!(autoscroll_speed(-100.0) < 0.0);
+        assert_eq!(autoscroll_speed(-10_000.0), -2000.0);
     }
 }
 

@@ -27,6 +27,10 @@ pub struct Settings {
     pub proxy: String,
     // Player
     pub default_quality: u32,
+    /// Frame rate to prefer when a resolution offers both (0 = highest, else 60 or 30).
+    pub preferred_fps: u32,
+    /// List each frame rate separately in the player's quality menu (1080p60 vs 1080p30).
+    pub quality_variants: bool,
     pub codec_pref: String,
     pub default_speed: f64,
     pub remember_speed_per_channel: bool,
@@ -39,6 +43,16 @@ pub struct Settings {
     pub captions_lang: String,
     pub loop_video: bool,
     pub seek_step: f64,
+    /// Video kept ahead of the playhead in mpv's demuxer cache (MiB).
+    pub read_ahead_mb: u32,
+    /// Already-played video kept behind the playhead (MiB).
+    pub read_ahead_back_mb: u32,
+    // Custom speed shortcuts
+    pub speed_up_key: String,
+    pub speed_up_step: f64,
+    pub speed_down_key: String,
+    pub speed_down_step: f64,
+    pub speed_reset_key: String,
     // SponsorBlock / DeArrow / RYD
     pub sponsorblock: bool,
     pub sponsorblock_server: String,
@@ -73,6 +87,8 @@ pub struct Settings {
     pub feed_source: String,
     pub feed_include_shorts: bool,
     pub feed_include_live: bool,
+    /// Reload a profile's feed when its cache is older than this many minutes.
+    pub profile_refresh_min: u32,
     // Downloads / external
     pub download_dir: String,
     /// The user picked (or accepted) the download folder; until then the first download asks.
@@ -149,6 +165,8 @@ impl Default for Settings {
             ytdlp_path: String::new(),
             proxy: String::new(),
             default_quality: 1080,
+            preferred_fps: 0,
+            quality_variants: true,
             codec_pref: "vp9".into(),
             default_speed: 1.0,
             remember_speed_per_channel: true,
@@ -161,6 +179,13 @@ impl Default for Settings {
             captions_lang: "en".into(),
             loop_video: false,
             seek_step: 5.0,
+            read_ahead_mb: 96,
+            read_ahead_back_mb: 24,
+            speed_up_key: "d".into(),
+            speed_up_step: 0.25,
+            speed_down_key: "s".into(),
+            speed_down_step: 0.25,
+            speed_reset_key: "r".into(),
             sponsorblock: true,
             sponsorblock_server: "https://sponsor.ajay.app".into(),
             sb_actions: sb,
@@ -190,6 +215,7 @@ impl Default for Settings {
             feed_source: "full".into(),
             feed_include_shorts: false,
             feed_include_live: true,
+            profile_refresh_min: 60,
             download_dir: dirs::download_dir()
                 .map(|d| d.join("Stream Tube").to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -305,10 +331,16 @@ fn normalize_settings(s: &mut Settings) {
             s.default_quality = 1080;
         }
     }
+    if !matches!(s.preferred_fps, 0 | 30 | 60) {
+        s.preferred_fps = 0;
+    }
     s.ui_scale = s.ui_scale.clamp(0.75, 1.5);
     if s.ui_scale == 0.0 {
         s.ui_scale = 1.0;
     }
+    s.read_ahead_mb = s.read_ahead_mb.min(4096);
+    s.read_ahead_back_mb = s.read_ahead_back_mb.min(4096);
+    s.profile_refresh_min = s.profile_refresh_min.max(1);
 }
 
 pub fn settings_snapshot() -> Arc<Settings> {
@@ -393,7 +425,8 @@ const TABLES: &str = "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value
      CREATE TABLE IF NOT EXISTS search_history (query TEXT PRIMARY KEY, at INTEGER NOT NULL);
      CREATE TABLE IF NOT EXISTS feed_cache (channel_id TEXT PRIMARY KEY, json TEXT NOT NULL, fetched_at INTEGER NOT NULL);
      CREATE TABLE IF NOT EXISTS channel_speed (channel_id TEXT PRIMARY KEY, speed REAL NOT NULL);
-     CREATE TABLE IF NOT EXISTS saved_playlists (playlist_id TEXT PRIMARY KEY, json TEXT NOT NULL, added_at INTEGER NOT NULL);";
+     CREATE TABLE IF NOT EXISTS saved_playlists (playlist_id TEXT PRIMARY KEY, json TEXT NOT NULL, added_at INTEGER NOT NULL);
+     CREATE TABLE IF NOT EXISTS account_playlists (playlist_id TEXT PRIMARY KEY, json TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0, added_at INTEGER NOT NULL);";
 
 /// Opens the database and checks it. A damaged one (its pages no longer agree
 /// with each other, so lookups can return another row's data) is rebuilt from
@@ -927,6 +960,60 @@ pub fn is_playlist_saved(id: &str) -> bool {
         .ok()
         .flatten()
         .is_some()
+}
+
+// ───────────────────────── account playlists (sidebar cache) ─────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct CachedPlaylist {
+    pub pinned: bool,
+    pub item: crate::api::types::PlaylistItem,
+}
+
+/// Caches the signed-in account's playlists so the sidebar can list them.
+/// Updates the stored metadata but keeps each playlist's pinned flag.
+pub fn cache_account_playlists(list: &[crate::api::types::PlaylistItem]) {
+    let conn = db().lock();
+    for p in list {
+        let Ok(j) = serde_json::to_string(p) else { continue };
+        let _ = conn.execute(
+            "INSERT INTO account_playlists(playlist_id, json, pinned, added_at) VALUES (?1, ?2, 0, ?3)
+             ON CONFLICT(playlist_id) DO UPDATE SET json=excluded.json",
+            params![p.id, j, crate::api::json::now()],
+        );
+    }
+}
+
+/// Pinned playlists first, then the rest, in the order they were first seen.
+pub fn account_playlists() -> Vec<CachedPlaylist> {
+    let conn = db().lock();
+    let mut st = conn
+        .prepare("SELECT pinned, json FROM account_playlists ORDER BY pinned DESC, added_at")
+        .unwrap();
+    st.query_map([], |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, String>(1)?)))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|(pinned, j)| serde_json::from_str(&j).ok().map(|item| CachedPlaylist { pinned, item }))
+        .collect()
+}
+
+pub fn is_playlist_pinned(id: &str) -> bool {
+    db().lock()
+        .query_row("SELECT pinned FROM account_playlists WHERE playlist_id=?1", [id], |r| r.get::<_, i64>(0))
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+        != 0
+}
+
+pub fn set_playlist_pinned(p: &crate::api::types::PlaylistItem, pinned: bool) {
+    let j = serde_json::to_string(p).unwrap_or_default();
+    let _ = db().lock().execute(
+        "INSERT INTO account_playlists(playlist_id, json, pinned, added_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(playlist_id) DO UPDATE SET pinned=excluded.pinned, json=excluded.json",
+        params![p.id, j, pinned as i64, crate::api::json::now()],
+    );
 }
 
 // ───────────────────────── per-channel speed ─────────────────────────

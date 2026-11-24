@@ -2,7 +2,7 @@ use crate::api::innertube::{self, SearchFilter};
 use crate::api::json::compact_number;
 use crate::api::services;
 use crate::api::types::*;
-use crate::player::controller::player;
+use crate::player::controller::{Player, player};
 use crate::store;
 use crate::ui::app::{Route, UiState, navigate};
 use crate::ui::*;
@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 pub struct ShortsPage {
+    /// The tab's own player, so a parked page keeps updating the right engine.
+    player: Entity<Player>,
     list: Vec<VideoItem>,
     idx: usize,
     loading: bool,
@@ -39,17 +41,20 @@ pub struct ShortsPage {
 
 impl ShortsPage {
     pub fn new(start: Option<String>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sub = cx.subscribe(&player(cx), |this: &mut Self, _, ev: &crate::player::controller::PlayerEvent, cx| {
+        let player = player(cx);
+        let sub = cx.subscribe(&player, |this: &mut Self, _, ev: &crate::player::controller::PlayerEvent, cx| {
             if matches!(ev, crate::player::controller::PlayerEvent::Ended) && store::settings_snapshot().shorts_autoadvance {
                 this.advance(cx);
             }
         });
-        cx.on_release(|_, cx| {
+        let release_player = player.clone();
+        cx.on_release(move |_, cx| {
             let l = store::settings_snapshot().loop_video;
-            player(cx).update(cx, |p, _| p.set_loop(l));
+            release_player.update(cx, |p, _| p.set_loop(l));
         })
         .detach();
         let mut s = Self {
+            player,
             list: Vec::new(),
             idx: 0,
             loading: true,
@@ -127,7 +132,7 @@ impl ShortsPage {
 
     fn play_current(&mut self, cx: &mut Context<Self>) {
         let Some(v) = self.list.get(self.idx).cloned() else { return };
-        let pl = player(cx);
+        let pl = self.player.clone();
         pl.update(cx, |p, cx| {
             p.queue.clear();
             p.queue_pos = None;

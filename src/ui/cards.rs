@@ -2,7 +2,7 @@
 use super::*;
 use crate::api::types::*;
 use crate::store;
-use crate::ui::app::{MenuItem, Route, navigate, open_menu};
+use crate::ui::app::{MenuItem, Route, activate, navigate, open_menu};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -115,10 +115,15 @@ fn badge(v: &VideoItem, cx: &App) -> Option<AnyElement> {
     )
 }
 
-pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixels, cx: &App) -> Div {
+pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixels, cx: &App) -> Stateful<Div> {
     let p = pal(cx);
     let progress = watched_progress(&v.id, cx);
+    let group = SharedString::from(format!("thumb-{}", v.id));
+    let save = v.clone();
+    let queue = v.clone();
+    let chooser = v.clone();
     div()
+        .id(SharedString::from(format!("th-{}", v.id)))
         .relative()
         .w(w)
         .h(h)
@@ -126,6 +131,11 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
         .rounded(radius * (store::settings_snapshot().thumb_radius / 12.0))
         .overflow_hidden()
         .bg(p.surface)
+        .group(group.clone())
+        .on_aux_click(move |_, window, cx| {
+            cx.stop_propagation();
+            crate::ui::app::open_save_dialog(chooser.clone(), window, cx);
+        })
         .child(img(SharedString::from(url)).size_full().object_fit(ObjectFit::Cover))
         .child(crate::player::preview::slot_marker(&v.id, cx))
         .children(badge(v, cx))
@@ -141,14 +151,46 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
                     .child(div().h_full().w(relative(pr)).bg(p.accent)),
             )
         })
+        .child(
+            div()
+                .absolute()
+                .top_2()
+                .right_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .invisible()
+                .group_hover(group, |s| s.visible())
+                .child(
+                    icon_square(SharedString::from(format!("wl-{}", v.id)), "clock")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(wl) = store::playlists().into_iter().find(|p| p.protected && p.name == "Watch later") {
+                                store::playlist_add(wl.id, &save);
+                                toast(cx, "Saved to Watch later");
+                            }
+                        }),
+                )
+                .child(
+                    icon_square(SharedString::from(format!("aq-{}", v.id)), "list-plus")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            crate::player::controller::enqueue(queue.clone(), cx);
+                            toast(cx, "Added to queue");
+                        }),
+                ),
+        )
 }
 
 pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     let mut items = Vec::new();
     {
         let route = if v.is_short { Route::Shorts(Some(v.id.clone())) } else { Route::Watch { id: v.id.clone(), playlist: None, start: None } };
+        let title = v.title.clone();
         items.push(MenuItem::new("app-window", "Open in new tab", move |window, cx| {
-            crate::ui::app::open_in_new_tab(route.clone(), false, window, cx)
+            crate::ui::app::open_in_new_tab(route.clone(), Some(title.clone()), false, window, cx)
         }));
     }
     let v1 = v.clone();
@@ -178,6 +220,10 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     let id = v.id.clone();
     items.push(MenuItem::new("link", "Copy link", move |_, cx| {
         copy_to_clipboard(format!("https://www.youtube.com/watch?v={id}"), cx);
+    }));
+    let thumb = v.thumbnail.clone();
+    items.push(MenuItem::new("image", "Copy thumbnail", move |_, cx| {
+        copy_image_to_clipboard(thumb.clone(), cx);
     }));
     let id2 = v.id.clone();
     items.push(MenuItem::new("globe", "Open on YouTube", move |_, _| {
@@ -256,8 +302,11 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
     }
     let p = pal(cx);
     let (title, thumb) = branded(v, cx);
+    let tab_title = title.clone();
     let h = width * (9. / 16.);
     let route = watch_route(v);
+    let route_aux = route.clone();
+    let title_aux = tab_title.clone();
     let channel_route = v.channel_id.clone().map(Route::Channel);
     let meta = meta_line(v);
     let show_avatar = show_channel && !store::settings_snapshot().hide_channel_avatars;
@@ -270,7 +319,8 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
         .gap_3()
         .cursor_pointer()
         .group("card")
-        .on_click(move |_, window, cx| navigate(route.clone(), window, cx))
+        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), ev, window, cx))
+        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), ev, window, cx))
         .child(thumbnail(v, thumb, width, h, px(12.), cx))
         .child(
             div()
@@ -334,7 +384,15 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
 pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
     let p = pal(cx);
     let (title, thumb) = branded(v, cx);
+    let tab_title = title.clone();
+    let title_aux = tab_title.clone();
     let id = v.id.clone();
+    let route = if store::settings_snapshot().shorts_in_player {
+        Route::Watch { id: id.clone(), playlist: None, start: None }
+    } else {
+        Route::Shorts(Some(id.clone()))
+    };
+    let route_aux = route.clone();
     let h = width * (16. / 9.);
     div()
         .id(SharedString::from(format!("sc-{}", v.id)))
@@ -343,14 +401,8 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
         .w(width)
         .gap_2()
         .cursor_pointer()
-        .on_click(move |_, window, cx| {
-            let route = if store::settings_snapshot().shorts_in_player {
-                Route::Watch { id: id.clone(), playlist: None, start: None }
-            } else {
-                Route::Shorts(Some(id.clone()))
-            };
-            navigate(route, window, cx)
-        })
+        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), ev, window, cx))
+        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), ev, window, cx))
         .child(thumbnail(v, thumb, width, h, px(12.), cx))
         .child(
             div()
@@ -375,7 +427,10 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
 pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
     let p = pal(cx);
     let (title, thumb) = branded(v, cx);
+    let tab_title = title.clone();
     let route = watch_route(v);
+    let route_aux = route.clone();
+    let title_aux = tab_title.clone();
     let channel_route = v.channel_id.clone().map(Route::Channel);
     let meta = meta_line(v);
     div()
@@ -385,7 +440,8 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
         .gap_4()
         .w_full()
         .cursor_pointer()
-        .on_click(move |_, window, cx| navigate(route.clone(), window, cx))
+        .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), ev, window, cx))
+        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), ev, window, cx))
         .child(thumbnail(v, thumb, thumb_w, thumb_w * (9. / 16.), px(12.), cx))
         .child(
             div()
@@ -436,6 +492,9 @@ pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut
     let p = pal(cx);
     let (title, thumb) = branded(v, cx);
     let route = watch_route(v);
+    let route_aux = route.clone();
+    let tab_title = title.clone();
+    let title_aux = tab_title.clone();
     div()
         .id(SharedString::from(format!("cr-{}", v.id)))
         .on_hover(prefetch_hover(&v.id))
@@ -447,10 +506,11 @@ pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut
         .cursor_pointer()
         .when(active, |d| d.bg(p.hover))
         .hover(move |s| s.bg(p.surface))
-        .on_click(move |_, window, cx| match &on_click {
+        .on_click(move |ev, window, cx| match &on_click {
             Some(f) => f(window, cx),
-            None => navigate(route.clone(), window, cx),
+            None => activate(route.clone(), Some(tab_title.clone()), ev, window, cx),
         })
+        .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), ev, window, cx))
         .child(thumbnail(v, thumb, px(168.), px(94.), px(8.), cx))
         .child(
             div()
@@ -575,10 +635,35 @@ pub fn channel_card(c: &ChannelItem, width: Pixels, cx: &mut App) -> AnyElement 
         .into_any_element()
 }
 
-pub fn playlist_card(pl: &PlaylistItem, width: Pixels, cx: &mut App) -> AnyElement {
+pub fn playlist_card(pl: &PlaylistItem, width: Pixels, pin: Option<bool>, cx: &mut App) -> AnyElement {
     let p = pal(cx);
     let id = pl.id.clone();
     let h = width * (9. / 16.);
+    let thumb = playlist_thumb(pl.thumbnail.clone(), pl.video_count_text.clone(), width, h, cx);
+    let thumb = match pin {
+        Some(pinned) => {
+            let item = pl.clone();
+            div()
+                .relative()
+                .child(thumb)
+                .child(
+                    div()
+                        .absolute()
+                        .top_2()
+                        .right_2()
+                        .child(
+                            icon_square(SharedString::from(format!("pin-{}", pl.id)), if pinned { "pin" } else { "pin-off" })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    store::set_playlist_pinned(&item, !pinned);
+                                    cx.refresh_windows();
+                                }),
+                        ),
+                )
+        }
+        None => thumb,
+    };
     div()
         .id(SharedString::from(format!("pc-{}", pl.id)))
         .flex()
@@ -587,7 +672,7 @@ pub fn playlist_card(pl: &PlaylistItem, width: Pixels, cx: &mut App) -> AnyEleme
         .gap_3()
         .cursor_pointer()
         .on_click(move |_, window, cx| navigate(Route::Playlist(id.clone()), window, cx))
-        .child(playlist_thumb(pl.thumbnail.clone(), pl.video_count_text.clone(), width, h, cx))
+        .child(thumb)
         .child(
             div()
                 .flex()
@@ -673,7 +758,7 @@ pub fn grid_item(item: &Item, width: Pixels, show_channel: bool, cx: &mut App) -
     match item {
         Item::Video(v) => video_card(v, width, show_channel, cx),
         Item::Channel(c) => channel_card(c, width, cx),
-        Item::Playlist(p) => playlist_card(p, width, cx),
+        Item::Playlist(p) => playlist_card(p, width, None, cx),
     }
 }
 

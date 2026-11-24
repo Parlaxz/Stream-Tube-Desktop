@@ -1,9 +1,9 @@
 ; Stream Tube installer (Inno Setup 6)
-; Build:  ISCC.exe /DAppVersion=0.7.2-alpha installer\streamtube.iss
+; Build:  ISCC.exe /DAppVersion=0.8.0 installer\streamtube.iss
 ; Needs a release build in target\release and libmpv-2.dll in third_party\mpv.
 
 #ifndef AppVersion
-  #define AppVersion "0.7.2-alpha"
+  #define AppVersion "0.8.0"
 #endif
 #define AppName "Stream Tube"
 #define AppExe "streamtube.exe"
@@ -14,10 +14,10 @@ AppId={{6F1D7C1E-5B7A-4C1D-9A55-2E7A0C3B9F41}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
-AppPublisher=Avaneesh Inamdar
-AppPublisherURL=https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop
-AppSupportURL=https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/issues
-AppUpdatesURL=https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/releases
+AppPublisher=Parlaxz
+AppPublisherURL=https://github.com/Parlaxz/Stream-Tube-Desktop
+AppSupportURL=https://github.com/Parlaxz/Stream-Tube-Desktop/issues
+AppUpdatesURL=https://github.com/Parlaxz/Stream-Tube-Desktop/releases
 ; per-user install: no admin prompt, and the in-app updater can replace files
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\{#AppName}

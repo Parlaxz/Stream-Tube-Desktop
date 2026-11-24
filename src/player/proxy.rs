@@ -80,12 +80,13 @@ pub fn local_url(url: &str, len: Option<u64>, mime: &str) -> String {
 /// segment is fetched by the app (so it uses the app's network settings, e.g.
 /// IPv4 only, which the stream URLs are bound to), and variants taller than
 /// `max_height` (0 = no limit) are left out so mpv plays the chosen quality.
-pub fn local_hls(url: &str, max_height: u32, audio: Option<&str>) -> String {
+/// `fps_pref` (0 = highest) breaks ties between 1080p60 and 1080p30 variants.
+pub fn local_hls(url: &str, max_height: u32, fps_pref: u32, audio: Option<&str>) -> String {
     let Some(p) = proxy() else { return url.to_string() };
     let id = register(p, url, None, HLS);
     match audio {
-        Some(a) => format!("http://127.0.0.1:{}/h/{id}?max={max_height}&audio={}", p.port, crate::api::http::urlencode(a)),
-        None => format!("http://127.0.0.1:{}/h/{id}?max={max_height}", p.port),
+        Some(a) => format!("http://127.0.0.1:{}/h/{id}?max={max_height}&fps={fps_pref}&audio={}", p.port, crate::api::http::urlencode(a)),
+        None => format!("http://127.0.0.1:{}/h/{id}?max={max_height}&fps={fps_pref}", p.port),
     }
 }
 
@@ -110,7 +111,7 @@ fn hls_attr(line: &str, key: &str) -> Option<String> {
 /// `max_height` and the codec preference) plus its default audio rendition.
 /// ffmpeg opens every playlist a master lists before starting, so serving the
 /// full master (often 30+ playlists) delays the start by many seconds.
-fn rewrite_master(p: &Proxy, text: &str, max_height: u32, audio_name: Option<&str>) -> String {
+fn rewrite_master(p: &Proxy, text: &str, max_height: u32, fps_pref: u32, audio_name: Option<&str>) -> String {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let mut header = Vec::new();
     let mut medias = Vec::new();
@@ -145,11 +146,13 @@ fn rewrite_master(p: &Proxy, text: &str, max_height: u32, audio_name: Option<&st
         if kind == pref { 3 } else if kind == "h264" { 2 } else { 1 }
     };
     let bw = |l: &str| hls_attr(l, "BANDWIDTH").and_then(|b| b.parse::<u64>().ok()).unwrap_or(0);
+    let fps = |l: &str| hls_attr(l, "FRAME-RATE").and_then(|f| f.parse::<f64>().ok()).map(|f| f.round() as u32).unwrap_or(0);
+    let fps_match = |l: &str| (fps_pref != 0 && fps(l) == fps_pref) as u8;
     let fits: Vec<&(&str, &str)> = variants.iter().filter(|(l, _)| max_height == 0 || class(l) <= max_height).collect();
     let chosen = if fits.is_empty() {
         variants.iter().min_by_key(|(l, _)| (class(l), bw(l)))
     } else {
-        fits.into_iter().max_by_key(|(l, _)| (class(l), codec_rank(l), bw(l)))
+        fits.into_iter().max_by_key(|(l, _)| (class(l), fps_match(l), fps(l), codec_rank(l), bw(l)))
     };
     let Some((inf, uri)) = chosen else { return rewrite_playlist(p, text, max_height) };
     let local_pl = |u: &str| format!("http://127.0.0.1:{}/h/{}?max=0", p.port, register(p, u, None, HLS));
@@ -253,7 +256,7 @@ fn rewrite_playlist(p: &Proxy, text: &str, max_height: u32) -> String {
     out
 }
 
-fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, audio: Option<&str>) -> std::io::Result<()> {
+fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, fps_pref: u32, audio: Option<&str>) -> std::io::Result<()> {
     let mut text = None;
     for attempt in 0..3u64 {
         if let Ok(mut r) = agent().get(url).header("User-Agent", crate::api::http::BROWSER_UA).call() {
@@ -268,7 +271,7 @@ fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, a
         conn.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     };
-    let body = if text.contains("#EXT-X-STREAM-INF") { rewrite_master(p, &text, max_height, audio) } else { rewrite_playlist(p, &text, max_height) };
+    let body = if text.contains("#EXT-X-STREAM-INF") { rewrite_master(p, &text, max_height, fps_pref, audio) } else { rewrite_playlist(p, &text, max_height) };
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -387,9 +390,10 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         let query = rest.split_once('?').map(|q| q.1).unwrap_or("");
         let param = |k: &str| query.split('&').find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')));
         let max = param("max").and_then(|m| m.parse().ok()).unwrap_or(0);
+        let fps = param("fps").and_then(|m| m.parse().ok()).unwrap_or(0);
         let audio = param("audio").map(crate::api::http::urldecode);
         return match lookup(rest) {
-            Some(url) => serve_playlist(&mut conn, p, &url, max, audio.as_deref()),
+            Some(url) => serve_playlist(&mut conn, p, &url, max, fps, audio.as_deref()),
             None => conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
         };
     }

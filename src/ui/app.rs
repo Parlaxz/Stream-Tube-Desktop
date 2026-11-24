@@ -7,15 +7,15 @@ use crate::player::controller::{Player, player};
 use crate::player::view::PlayerView;
 use crate::store;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::ClickEvent;
 
 // ───────────────────────── routes ─────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Route {
     Home,
-    Explore(usize),
     Shorts(Option<String>),
-    Subscriptions,
+    Subscriptions(Option<i64>),
     Channels,
     History,
     Library,
@@ -32,9 +32,8 @@ impl Route {
     fn title(&self) -> String {
         match self {
             Route::Home => "Home".into(),
-            Route::Explore(i) => innertube::EXPLORE.get(*i).map(|e| e.0.to_string()).unwrap_or_default(),
             Route::Shorts(_) => "Shorts".into(),
-            Route::Subscriptions => "Subscriptions".into(),
+            Route::Subscriptions(_) => "Subscriptions".into(),
             Route::Channels => "Channels".into(),
             Route::History => "History".into(),
             Route::Library => "Playlists".into(),
@@ -53,6 +52,8 @@ pub struct UiState {
     pub theater: bool,
     pub fullscreen: bool,
     pub sidebar_open: bool,
+    /// Keep the home feed through reloads instead of replacing it (topbar pin).
+    pub preserve_home: bool,
     pub content_width: Pixels,
     pub viewport: Size<Pixels>,
 }
@@ -128,9 +129,14 @@ mod link_tests {
 }
 
 pub fn navigate(route: Route, window: &mut Window, cx: &mut App) {
+    navigate_titled(route, None, window, cx)
+}
+
+/// Like [`navigate`], but carries a card title so a background tab can show it.
+pub fn navigate_titled(route: Route, title: Option<String>, window: &mut Window, cx: &mut App) {
     // Ctrl+click (Cmd+click) on any card or link opens it in a new tab, like a browser
     if window.modifiers().secondary(cx) {
-        open_in_new_tab(route, false, window, cx);
+        open_in_new_tab(route, title, false, window, cx);
         return;
     }
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
@@ -139,9 +145,19 @@ pub fn navigate(route: Route, window: &mut Window, cx: &mut App) {
 }
 
 /// Opens a page in a new tab, in the background unless `switch` is set.
-pub fn open_in_new_tab(route: Route, switch: bool, window: &mut Window, cx: &mut App) {
+pub fn open_in_new_tab(route: Route, title: Option<String>, switch: bool, window: &mut Window, cx: &mut App) {
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
-        app.update(cx, |a, cx| a.new_tab(route, switch, window, cx));
+        app.update(cx, |a, cx| a.new_tab(route, title, switch, window, cx));
+    }
+}
+
+/// Ctrl/Cmd+left click or a middle click opens `route` in a new tab; a plain
+/// left click navigates in place. Both gestures call this so they behave the same.
+pub fn activate(route: Route, title: Option<String>, ev: &ClickEvent, window: &mut Window, cx: &mut App) {
+    if ev.is_middle_click() || (ev.standard_click() && ev.modifiers().secondary(cx)) {
+        open_in_new_tab(route, title, false, window, cx);
+    } else if ev.standard_click() {
+        navigate_titled(route, title, window, cx);
     }
 }
 
@@ -243,6 +259,20 @@ pub enum Dialog {
     Confirm { title: String, body: String, confirm: String, on_confirm: Arc<dyn Fn(&mut Window, &mut App)> },
     /// a newer version is on GitHub
     Update,
+}
+
+/// Caches the account's playlists so the sidebar can list pinned first.
+pub fn sync_account_playlists(cx: &mut App) {
+    if !crate::api::auth::signed_in() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        if let Ok(l) = blocking(crate::api::auth::my_playlists).await {
+            store::cache_account_playlists(&l);
+            let _ = cx.update(|cx| cx.refresh_windows());
+        }
+    })
+    .detach();
 }
 
 /// Pulls the account's watch history (videos watched on other devices, with resume
@@ -384,15 +414,18 @@ pub fn confirm(title: &str, body: &str, confirm: &str, window: &mut Window, cx: 
 struct Tab {
     id: u64,
     route: Route,
+    /// Title from the card this tab was opened from, so a background tab can
+    /// show it without building a page or fetching anything.
+    title: Option<String>,
     /// built the first time the tab is shown, so a video opened in the
     /// background doesn't start playing on its own
     page: Option<AnyView>,
     history: Vec<(Route, AnyView)>,
     forward: Vec<(Route, AnyView)>,
+    /// Each tab owns its player and mpv engine, so parked tabs keep their
+    /// loaded video data (and exact position) in memory.
+    player: Entity<Player>,
 }
-
-/// At most this many tabs; more would only hold pages nobody looks at.
-const MAX_TABS: usize = 12;
 
 pub struct AppView {
     /// every tab in order; the entry at `active_tab` is a placeholder for the
@@ -435,15 +468,27 @@ pub struct AppView {
     drawer_open: bool,
     /// sidebar subscriptions list: all channels instead of the first few
     subs_expanded: bool,
+    /// sidebar subscriptions section hidden behind its chevron
+    subs_collapsed: bool,
+    /// sidebar playlists list: show unpinned playlists as well as pinned ones
+    playlists_expanded: bool,
     /// downloads dropdown under the topbar button
     dl_panel: bool,
+    /// observes the active tab's player (mini-player visibility)
+    player_sub: Subscription,
+    /// left/right buttons currently held, for the tab-switcher chord
+    left_down: bool,
+    right_down: bool,
+    /// the tab overview grid is open
+    tab_grid_open: bool,
     _subs: Vec<Subscription>,
 }
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.set_global(AppHandle(cx.entity().downgrade()));
-        cx.set_global(UiState { sidebar_open: true, ..Default::default() });
+        let preserve_home = store::kv_get("preserve_home").as_deref() == Some("1");
+        cx.set_global(UiState { sidebar_open: true, preserve_home, ..Default::default() });
         cx.set_global(OpenMenu::default());
         crate::downloads::load_history(cx);
         cx.set_global(AutoplayNext::default());
@@ -496,13 +541,13 @@ impl AppView {
         let p = player(cx);
         // Only re-render the shell when the mini player appears/disappears; the
         // player views re-render themselves for every frame.
-        subs.push(cx.observe(&p, |this: &mut Self, p, cx| {
+        let player_sub = cx.observe(&p, |this: &mut Self, p, cx| {
             let has = p.read(cx).video.is_some();
             if has != this.had_video {
                 this.had_video = has;
                 cx.notify();
             }
-        }));
+        });
         subs.push(cx.observe_window_bounds(window, |this: &mut Self, window, _| {
             // persist placement at most twice a second while the user drags/resizes
             if this.last_bounds_save.elapsed() > std::time::Duration::from_millis(500) {
@@ -551,7 +596,8 @@ impl AppView {
         }));
         window.on_window_should_close(cx, |window, _| {
             crate::save_window_bounds(window);
-            true
+            // X hides to the tray; only the tray's Exit really closes the app
+            !crate::tray::hide_to_tray(window)
         });
         let mini_view = cx.new(|cx| PlayerView::new(p.clone(), true, cx));
         let main_view = cx.new(|cx| PlayerView::new(p.clone(), false, cx));
@@ -563,7 +609,7 @@ impl AppView {
         // a YouTube link passed on the command line opens directly
         let arg_route = route_from_link(&std::env::args().nth(1).unwrap_or_default());
         let start = arg_route.unwrap_or_else(|| match store::settings_snapshot().start_page.as_str() {
-            "subscriptions" => Route::Subscriptions,
+            "subscriptions" => Route::Subscriptions(None),
             "history" => Route::History,
             _ => Route::Home,
         });
@@ -581,6 +627,7 @@ impl AppView {
         // account: immediately when it's empty, otherwise once a day
         if crate::api::auth::signed_in() {
             sync_account_history(cx);
+            sync_account_playlists(cx);
             let last = store::kv_get("subs_synced_at").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
             if store::subscriptions().is_empty() || crate::api::json::now() - last > 24 * 3600 {
                 cx.spawn(async move |this, cx| {
@@ -594,7 +641,15 @@ impl AppView {
             }
         }
         Self {
-            tabs: vec![Tab { id: 1, route: start.clone(), page: None, history: Vec::new(), forward: Vec::new() }],
+            tabs: vec![Tab {
+                id: 1,
+                route: start.clone(),
+                title: None,
+                page: None,
+                history: Vec::new(),
+                forward: Vec::new(),
+                player: p.clone(),
+            }],
             active_tab: 0,
             next_tab_id: 2,
             route: start,
@@ -625,8 +680,14 @@ impl AppView {
             reload_page: false,
             drawer_open: false,
             subs_expanded: false,
+            subs_collapsed: false,
+            playlists_expanded: false,
             dl_panel: false,
             space_down: false,
+            player_sub,
+            left_down: false,
+            right_down: false,
+            tab_grid_open: false,
             _subs: subs,
         }
     }
@@ -1078,23 +1139,30 @@ impl AppView {
         cx.notify();
     }
 
+    /// Sidebar navigation: Ctrl/Cmd+left click or a middle click opens the
+    /// target in a new tab, any other click navigates in place.
+    fn nav(&mut self, route: Route, ev: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if ev.is_middle_click() || (ev.standard_click() && ev.modifiers().secondary(cx)) {
+            self.new_tab(route, None, false, window, cx);
+        } else if ev.standard_click() {
+            self.go(route, window, cx);
+        }
+    }
+
     // ───── tabs ─────
 
-    pub fn new_tab(&mut self, route: Route, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn new_tab(&mut self, route: Route, title: Option<String>, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
         match &route {
             Route::Channel(id) | Route::Playlist(id) | Route::Watch { id, .. } if id.is_empty() => return,
             _ => {}
         }
         cx.set_global(OpenMenu(None));
-        if self.tabs.len() >= MAX_TABS {
-            toast(cx, format!("You can have up to {MAX_TABS} tabs open"));
-            return;
-        }
         let id = self.next_tab_id;
         self.next_tab_id += 1;
+        let player = crate::player::controller::create(cx);
         // right after the current tab, like a browser
         let at = self.active_tab + 1;
-        self.tabs.insert(at, Tab { id, route, page: None, history: Vec::new(), forward: Vec::new() });
+        self.tabs.insert(at, Tab { id, route, title, page: None, history: Vec::new(), forward: Vec::new(), player });
         if switch {
             self.switch_tab(at, window, cx);
         } else {
@@ -1111,6 +1179,9 @@ impl AppView {
         crate::player::preview::stop(cx);
         crate::ui::image_cache::on_navigate(cx);
         self.drawer_open = false;
+        // pause the player of the tab we are leaving; its engine and cache stay alive
+        let old_player = self.tabs[self.active_tab].player.clone();
+        old_player.update(cx, |p, cx| p.park(cx));
         // park the shown tab
         let cur = &mut self.tabs[self.active_tab];
         cur.route = self.route.clone();
@@ -1120,23 +1191,40 @@ impl AppView {
         // and show the other one
         self.active_tab = index;
         let next = self.tabs[index].clone();
+        crate::player::controller::set_active(next.player.clone(), cx);
         self.route = next.route;
         self.history = next.history;
         self.forward = next.forward;
-        // a watch page for another video than the one playing is built again,
-        // which starts its video (the same as going back to it)
-        let playing = player(cx).read(cx).video.as_ref().map(|v| v.id.clone());
-        let stale = matches!(&self.route, Route::Watch { id, .. } if playing.as_deref() != Some(id.as_str()));
+        // A parked page is shown again as it was: no rebuild, no stream request.
+        // A tab that has never been shown builds its page now, which starts its video.
         self.page = match next.page {
-            Some(p) if !stale => p,
-            _ => build_page(&self.route.clone(), window, cx),
+            Some(p) => p,
+            None => build_page(&self.route.clone(), window, cx),
         };
         if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. }) {
             toggle_fullscreen(window, cx);
         }
+        let pl = next.player.clone();
+        self.main_view.update(cx, |v, cx| v.set_player(pl.clone(), cx));
+        self.mini_view.update(cx, |v, cx| v.set_player(pl.clone(), cx));
+        self.follow_player(pl.clone(), cx);
+        pl.update(cx, |p, cx| p.unpark(cx));
+        crate::ui::pip::follow(pl, cx);
         window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Watches the active tab's player for the mini player appearing/disappearing.
+    fn follow_player(&mut self, player: Entity<Player>, cx: &mut Context<Self>) {
+        self.had_video = player.read(cx).video.is_some();
+        self.player_sub = cx.observe(&player, |this: &mut Self, p, cx| {
+            let has = p.read(cx).video.is_some();
+            if has != this.had_video {
+                this.had_video = has;
+                cx.notify();
+            }
+        });
     }
 
     pub fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1164,7 +1252,10 @@ impl AppView {
     }
 
     /// A short name for a tab's page.
-    fn tab_label(route: &Route, cx: &App) -> String {
+    fn tab_label(route: &Route, title: Option<&str>, cx: &App) -> String {
+        if let Some(t) = title.filter(|t| !t.is_empty()) {
+            return t.to_string();
+        }
         match route {
             Route::Watch { id, .. } => {
                 let p = player(cx).read(cx);
@@ -1177,9 +1268,9 @@ impl AppView {
 
     fn tab_icon(route: &Route) -> &'static str {
         match route {
-            Route::Home | Route::Explore(_) => "house",
+            Route::Home => "house",
             Route::Shorts(_) => "zap",
-            Route::Subscriptions | Route::Channels => "tv",
+            Route::Subscriptions(_) | Route::Channels => "tv",
             Route::History => "history",
             Route::Library | Route::LocalPlaylist(_) | Route::Playlist(_) => "list-video",
             Route::Search(_) => "search",
@@ -1195,24 +1286,20 @@ impl AppView {
             return None;
         }
         let p = pal(cx);
-        let mut strip = div()
+        let mut tabs = div()
             .id("tabs")
             .flex()
-            .flex_none()
             .items_center()
             .gap_1()
-            .h(px(38.))
-            .px_3()
-            .bg(p.bg)
-            .border_b_1()
-            .border_color(p.border)
+            .flex_1()
+            .min_w_0()
             .overflow_x_scroll();
         for i in 0..self.tabs.len() {
             let active = i == self.active_tab;
             let route = if active { self.route.clone() } else { self.tabs[i].route.clone() };
             let id = self.tabs[i].id;
-            let label = Self::tab_label(&route, cx);
-            strip = strip.child(
+            let label = Self::tab_label(&route, if active { None } else { self.tabs[i].title.as_deref() }, cx);
+            tabs = tabs.child(
                 div()
                     .id(("tab", id))
                     .flex()
@@ -1273,21 +1360,191 @@ impl AppView {
                     ),
             );
         }
-        strip = strip.child(
+        let plus = div()
+            .id("tab-new")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(30.))
+            .rounded_lg()
+            .cursor_pointer()
+            .hover(|d| d.bg(p.hover))
+            .child(icon("plus").size_4().text_color(p.text2))
+            .on_click(cx.listener(|this, _, window, cx| this.new_tab(Route::Home, None, true, window, cx)));
+        let grid = div()
+            .id("tab-grid")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(30.))
+            .rounded_lg()
+            .cursor_pointer()
+            .hover(|d| d.bg(p.hover))
+            .child(icon("layout-grid").size_4().text_color(p.text2))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.tab_grid_open = true;
+                cx.notify();
+            }));
+        Some(
             div()
-                .id("tab-new")
+                .id("tab-bar")
                 .flex()
                 .flex_none()
                 .items_center()
-                .justify_center()
-                .size(px(30.))
-                .rounded_lg()
-                .cursor_pointer()
-                .hover(|d| d.bg(p.hover))
-                .child(icon("plus").size_4().text_color(p.text2))
-                .on_click(cx.listener(|this, _, window, cx| this.new_tab(Route::Home, true, window, cx))),
-        );
-        Some(strip.into_any_element())
+                .gap_1()
+                .h(px(38.))
+                .px_3()
+                .bg(p.bg)
+                .border_b_1()
+                .border_color(p.border)
+                .child(tabs)
+                .child(plus)
+                .child(grid)
+                .into_any_element(),
+        )
+    }
+
+    /// Opens the tab grid on a left+right click chord.
+    fn mouse_button(&mut self, left: bool, cx: &mut Context<Self>) {
+        if left {
+            self.left_down = true;
+        } else {
+            self.right_down = true;
+        }
+        if self.left_down && self.right_down && !self.tab_grid_open {
+            self.tab_grid_open = true;
+            self.left_down = false;
+            self.right_down = false;
+            cx.set_global(OpenMenu(None));
+            cx.notify();
+        }
+    }
+
+    fn render_tab_grid(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.tab_grid_open {
+            return None;
+        }
+        let p = pal(cx);
+        let n = self.tabs.len().max(1);
+        let rows = ((n as f64).sqrt().floor() as usize).max(1);
+        let cols = (n + rows - 1) / rows;
+        let vp = cx.global::<UiState>().viewport;
+        let max_w = (f32::from(vp.width) * 0.85).clamp(340., 1600.);
+        let gap = 12.0;
+        let item_w = ((max_w - 32.0 - gap * cols.saturating_sub(1) as f32) / cols as f32).clamp(72., 180.);
+        let panel_w = item_w * cols as f32 + gap * cols.saturating_sub(1) as f32 + 32.0;
+        let item_h = item_w * 9.0 / 16.0;
+        let max_h = (f32::from(vp.height) * 0.8).max(240.);
+
+        let mut grid = div().grid().grid_cols(cols.min(u16::MAX as usize) as u16).gap_3();
+        for i in 0..self.tabs.len() {
+            let tab = &self.tabs[i];
+            let active = i == self.active_tab;
+            let route = if active { self.route.clone() } else { tab.route.clone() };
+            let label = Self::tab_label(&route, if active { None } else { tab.title.as_deref() }, cx);
+            let icon_name = Self::tab_icon(&route);
+            let thumb = match &route {
+                Route::Watch { id, .. } => Some(innertube::default_thumb(id)),
+                Route::Shorts(Some(id)) => Some(innertube::default_thumb(id)),
+                _ => None,
+            };
+            let id = tab.id;
+            let picture = match thumb {
+                Some(t) => img(t).size_full().object_fit(ObjectFit::Cover).into_any_element(),
+                None => div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(icon_name).size_8().text_color(p.text2))
+                    .into_any_element(),
+            };
+            grid = grid.child(
+                div()
+                    .id(("tg-item", id))
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
+                            this.switch_tab(i, window, cx);
+                        }
+                        this.tab_grid_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .relative()
+                            .w_full()
+                            .h(px(item_h))
+                            .overflow_hidden()
+                            .rounded_lg()
+                            .bg(p.surface2)
+                            .when(active, |d| d.border_2().border_color(p.accent))
+                            .child(picture),
+                    )
+                    .child(div().text_sm().line_clamp(2).text_color(if active { p.text } else { p.text2 }).child(label)),
+            );
+        }
+
+        Some(
+            deferred(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(
+                        div().id("tg-scrim").absolute().inset_0().occlude().bg(hsla(0., 0., 0., 0.55)).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.tab_grid_open = false;
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .id("tg-panel")
+                                    .occlude()
+                                    .w(px(panel_w))
+                                    .max_w(px(max_w))
+                                    .max_h(px(max_h))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .p_4()
+                                    .rounded_xl()
+                                    .bg(p.surface)
+                                    .border_1()
+                                    .border_color(p.border)
+                                    .shadow_2xl()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(format!("Tabs ({n})")))
+                                            .child(icon_button("tg-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
+                                                this.tab_grid_open = false;
+                                                cx.notify();
+                                            }))),
+                                    )
+                                    .child(div().id("tg-grid-wrap").flex_1().min_h_0().overflow_y_scroll().child(grid)),
+                            ),
+                    ),
+            )
+            .into_any_element(),
+        )
     }
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1476,6 +1733,31 @@ impl AppView {
             btn = btn.child(icon("download").text_color(p.text));
         }
         btn.into_any_element()
+    }
+
+    /// Topbar toggle: keep the home feed through reloads, only appending on scroll.
+    fn render_preserve_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = pal(cx);
+        let on = cx.global::<UiState>().preserve_home;
+        div()
+            .id("preserve-home")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size_10()
+            .rounded_full()
+            .cursor_pointer()
+            .hover(move |s| s.bg(p.hover))
+            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Preserve").build(window, cx))
+            .child(icon("pin").text_color(if on { p.accent } else { p.text }))
+            .on_click(cx.listener(|_, _, _, cx| {
+                let on = !cx.global::<UiState>().preserve_home;
+                cx.global_mut::<UiState>().preserve_home = on;
+                store::kv_set("preserve_home", if on { "1" } else { "0" });
+                cx.refresh_windows();
+            }))
+            .into_any_element()
     }
 
     fn render_dl_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1711,7 +1993,7 @@ impl AppView {
         if m.control && !m.alt {
             match k {
                 "t" if !m.shift => {
-                    self.new_tab(Route::Home, true, window, cx);
+                    self.new_tab(Route::Home, None, true, window, cx);
                     return;
                 }
                 "w" if !m.shift && self.tabs.len() > 1 => {
@@ -1735,6 +2017,11 @@ impl AppView {
                 }
                 _ => {}
             }
+        }
+        if k == "escape" && self.tab_grid_open {
+            self.tab_grid_open = false;
+            cx.notify();
+            return;
         }
         if k == "escape" && self.dl_panel {
             self.dl_panel = false;
@@ -1832,7 +2119,14 @@ impl AppView {
         if p.read(cx).video.is_none() {
             return;
         }
-        let step = store::settings_snapshot().seek_step;
+        let cs = store::settings_snapshot();
+        let step = cs.seek_step;
+        let up_key = cs.speed_up_key.trim().to_lowercase();
+        let down_key = cs.speed_down_key.trim().to_lowercase();
+        let reset_key = cs.speed_reset_key.trim().to_lowercase();
+        let up_step = cs.speed_up_step.max(0.01);
+        let down_step = cs.speed_down_step.max(0.01);
+        let default_speed = cs.default_speed;
         let held = ev.is_held;
         if k == "space" {
             self.space_down = true;
@@ -1906,16 +2200,21 @@ impl AppView {
                     pl.frame_step(true);
                     true
                 }
-                (",", true) | ("<", _) => {
+                (kk, false) if !down_key.is_empty() && kk.eq_ignore_ascii_case(&down_key) => {
                     let s = pl.speed;
-                    pl.set_speed(s - 0.25);
-                    crate::ui::toast(cx, format!("Speed {:.2}x", (s - 0.25).max(0.25)));
+                    pl.set_speed(s - down_step);
+                    crate::ui::toast(cx, format!("Speed {:.2}x", pl.speed));
                     true
                 }
-                (".", true) | (">", _) => {
+                (kk, false) if !up_key.is_empty() && kk.eq_ignore_ascii_case(&up_key) => {
                     let s = pl.speed;
-                    pl.set_speed(s + 0.25);
-                    crate::ui::toast(cx, format!("Speed {:.2}x", s + 0.25));
+                    pl.set_speed(s + up_step);
+                    crate::ui::toast(cx, format!("Speed {:.2}x", pl.speed));
+                    true
+                }
+                (kk, false) if !reset_key.is_empty() && kk.eq_ignore_ascii_case(&reset_key) => {
+                    pl.set_speed(default_speed);
+                    crate::ui::toast(cx, format!("Speed {:.2}x", pl.speed));
                     true
                 }
                 ("home", _) => {
@@ -2130,6 +2429,7 @@ impl AppView {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .child(self.render_preserve_button(cx))
                     .child(self.render_dl_button(cx))
                     .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
                     .child(self.account_button(cx))
@@ -2147,6 +2447,7 @@ impl AppView {
         if !ui.sidebar_open && !is_watch {
             // compact rail
             let rail = |id: &'static str, ic: &'static str, label: &'static str, r: Route, active: bool, cx: &mut Context<Self>| {
+                let r2 = r.clone();
                 div()
                     .id(id)
                     .flex()
@@ -2161,7 +2462,8 @@ impl AppView {
                     .hover(move |s| s.bg(p.hover))
                     .child(icon(ic).size_5().text_color(if active { p.accent } else { p.text }))
                     .child(div().text_size(px(10.)).text_color(p.text).child(label))
-                    .on_click(cx.listener(move |this, _, window, cx| this.go(r.clone(), window, cx)))
+                    .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.nav(r.clone(), ev, window, cx)))
+                    .on_aux_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.nav(r2.clone(), ev, window, cx)))
             };
             return div()
                 .flex()
@@ -2173,7 +2475,7 @@ impl AppView {
                 .pt_1()
                 .child(rail("r-home", "house", "Home", Route::Home, route == Route::Home, cx))
                 .when(!s.hide_shorts, |d| d.child(rail("r-shorts", "zap", "Shorts", Route::Shorts(None), matches!(route, Route::Shorts(_)), cx)))
-                .child(rail("r-subs", "tv", "Subscriptions", Route::Subscriptions, route == Route::Subscriptions, cx))
+                .child(rail("r-subs", "tv", "Subscriptions", Route::Subscriptions(None), matches!(route, Route::Subscriptions(_)), cx))
                 .child(rail("r-you", "circle-user", "You", Route::Library, route == Route::Library, cx))
                 .child(rail("r-dl", "download", "Downloads", Route::Downloads, route == Route::Downloads, cx))
                 .into_any_element();
@@ -2200,9 +2502,15 @@ impl AppView {
         let ic = |name: &str, active: bool| -> AnyElement {
             icon(name).size_5().text_color(if active { p.accent } else { p.text }).into_any_element()
         };
+        // Every clickable sidebar item goes through this so ctrl/middle click
+        // opens it in a new tab, including items added later.
+        let nav_item = |d: Stateful<Div>, r: Route, cx: &mut Context<Self>| {
+            let r2 = r.clone();
+            d.on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.nav(r.clone(), ev, window, cx)))
+                .on_aux_click(cx.listener(move |this, ev: &ClickEvent, window, cx| this.nav(r2.clone(), ev, window, cx)))
+        };
         let entry = |id: &'static str, name: &'static str, label: &str, r: Route, active: bool, cx: &mut Context<Self>| {
-            row(id.into(), ic(name, active), label.to_string(), active)
-                .on_click(cx.listener(move |this, _, window, cx| this.go(r.clone(), window, cx)))
+            nav_item(row(id.into(), ic(name, active), label.to_string(), active), r, cx)
         };
         let heading = |title: &str| {
             div()
@@ -2232,37 +2540,70 @@ impl AppView {
             .overflow_y_scroll()
             .child(entry("s-home", "house", "Home", Route::Home, route == Route::Home, cx))
             .when(!s.hide_shorts, |d| d.child(entry("s-shorts", "zap", "Shorts", Route::Shorts(None), matches!(route, Route::Shorts(_)), cx)))
-            .child(entry("s-subs", "tv", "Subscriptions", Route::Subscriptions, route == Route::Subscriptions, cx))
+            .child(entry("s-subs", "tv", "Subscriptions", Route::Subscriptions(None), matches!(route, Route::Subscriptions(_)), cx))
             .child(sep())
-            .child(
-                heading("You").id("s-you").cursor_pointer().rounded_lg().h(px(38.)).hover(move |s| s.bg(p.hover)).child(icon("chevron-right").size_4().text_color(p.text)).on_click(
-                    cx.listener(|this, _, window, cx| this.go(Route::Library, window, cx)),
-                ),
-            )
+            .child(nav_item(
+                heading("You").id("s-you").cursor_pointer().rounded_lg().h(px(38.)).hover(move |s| s.bg(p.hover)).child(icon("chevron-right").size_4().text_color(p.text)),
+                Route::Library,
+                cx,
+            ))
             .child(entry("s-hist", "history", "History", Route::History, route == Route::History, cx))
             .child(entry("s-pl", "list-video", "Playlists", Route::Library, route == Route::Library, cx));
         for pl in store::playlists().into_iter().filter(|p| p.protected) {
             let name = if pl.name == "Watch later" { "clock" } else { "thumbs-up" };
             let active = route == Route::LocalPlaylist(pl.id);
             let id = pl.id;
-            col = col.child(
-                row(SharedString::from(format!("s-lp-{id}")), ic(name, active), pl.name.clone(), active)
-                    .on_click(cx.listener(move |this, _, window, cx| this.go(Route::LocalPlaylist(id), window, cx))),
-            );
+            col = col.child(nav_item(
+                row(SharedString::from(format!("s-lp-{id}")), ic(name, active), pl.name.clone(), active),
+                Route::LocalPlaylist(id),
+                cx,
+            ));
         }
         col = col.child(entry("s-dl", "download", "Downloads", Route::Downloads, route == Route::Downloads, cx));
+
+        let profiles = store::profiles();
+        if !profiles.is_empty() {
+            col = col.child(sep()).child(heading("Profiles"));
+            for pr in profiles {
+                let id = pr.id;
+                let active = route == Route::Subscriptions(Some(id));
+                col = col.child(nav_item(
+                    row(SharedString::from(format!("s-prof-{id}")), ic("folder", active), pr.name.clone(), active),
+                    Route::Subscriptions(Some(id)),
+                    cx,
+                ));
+            }
+        }
 
         let subs = store::subscriptions();
         if !subs.is_empty() {
             const SHOWN: usize = 7;
+            let collapsed = self.subs_collapsed;
             col = col.child(sep()).child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .pr_1()
-                    .child(heading("Subscriptions"))
                     .child(
+                        div()
+                            .id("s-subs-head")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_3()
+                            .py_1()
+                            .rounded_lg()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(p.hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.subs_collapsed ^= true;
+                                cx.notify();
+                            }))
+                            .child(icon(if collapsed { "chevron-right" } else { "chevron-down" }).size_4().text_color(p.text))
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Subscriptions")),
+                    )
+                    .child(nav_item(
                         div()
                             .id("s-manage")
                             .px_2()
@@ -2272,43 +2613,75 @@ impl AppView {
                             .text_color(p.text2)
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover).text_color(p.text))
-                            .child("Manage")
-                            .on_click(cx.listener(|this, _, window, cx| this.go(Route::Channels, window, cx))),
-                    ),
+                            .child("Manage"),
+                        Route::Channels,
+                        cx,
+                    )),
             );
-            let n = if self.subs_expanded { subs.len() } else { subs.len().min(SHOWN) };
-            for sub in subs.iter().take(n) {
-                let cid = sub.channel_id.clone();
-                let active = route == Route::Channel(cid.clone());
-                col = col.child(
-                    row(SharedString::from(format!("s-sub-{}", sub.channel_id)), avatar(sub.avatar.as_deref(), px(24.), &sub.name, cx), sub.name.clone(), active)
-                        .on_click(cx.listener(move |this, _, window, cx| this.go(Route::Channel(cid.clone()), window, cx))),
-                );
+            if !collapsed {
+                let n = if self.subs_expanded { subs.len() } else { subs.len().min(SHOWN) };
+                for sub in subs.iter().take(n) {
+                    let cid = sub.channel_id.clone();
+                    let active = route == Route::Channel(cid.clone());
+                    col = col.child(nav_item(
+                        row(SharedString::from(format!("s-sub-{}", sub.channel_id)), avatar(sub.avatar.as_deref(), px(24.), &sub.name, cx), sub.name.clone(), active),
+                        Route::Channel(cid),
+                        cx,
+                    ));
+                }
+                if subs.len() > SHOWN {
+                    let expanded = self.subs_expanded;
+                    col = col.child(
+                        row(
+                            "s-subs-more".into(),
+                            icon(if expanded { "chevron-up" } else { "chevron-down" }).size_5().text_color(p.text).into_any_element(),
+                            if expanded { "Show fewer".into() } else { format!("Show {} more", subs.len() - SHOWN) },
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.subs_expanded ^= true;
+                            cx.notify();
+                        })),
+                    );
+                }
             }
-            if subs.len() > SHOWN {
-                let expanded = self.subs_expanded;
+        }
+        let account = if crate::api::auth::signed_in() { store::account_playlists() } else { Vec::new() };
+        let (pinned, unpinned): (Vec<_>, Vec<_>) = account.into_iter().partition(|c| c.pinned);
+        if !pinned.is_empty() || !unpinned.is_empty() {
+            col = col.child(sep());
+            for cp in pinned {
+                let id = cp.item.id.clone();
+                let active = route == Route::Playlist(id.clone());
+                col = col.child(nav_item(
+                    row(SharedString::from(format!("s-ytpl-{id}")), ic("pin", active), cp.item.title.clone(), active),
+                    Route::Playlist(id),
+                    cx,
+                ));
+            }
+            let shown = if self.playlists_expanded { unpinned.len() } else { 0 };
+            for cp in unpinned.iter().take(shown) {
+                let id = cp.item.id.clone();
+                let active = route == Route::Playlist(id.clone());
+                col = col.child(nav_item(
+                    row(SharedString::from(format!("s-ytpl-{id}")), ic("list-video", active), cp.item.title.clone(), active),
+                    Route::Playlist(id),
+                    cx,
+                ));
+            }
+            if !unpinned.is_empty() {
+                let expanded = self.playlists_expanded;
                 col = col.child(
                     row(
-                        "s-subs-more".into(),
+                        "s-pls-more".into(),
                         icon(if expanded { "chevron-up" } else { "chevron-down" }).size_5().text_color(p.text).into_any_element(),
-                        if expanded { "Show fewer".into() } else { format!("Show {} more", subs.len() - SHOWN) },
+                        if expanded { "Show fewer".into() } else { format!("Show {} more", unpinned.len()) },
                         false,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.subs_expanded ^= true;
+                        this.playlists_expanded ^= true;
                         cx.notify();
                     })),
-                );
-            }
-        }
-        if !s.hide_explore {
-            col = col.child(sep()).child(heading("Explore"));
-            let icons = ["music", "gamepad-2", "newspaper", "trophy", "radio", "shirt", "lightbulb"];
-            for (i, (name, _)) in innertube::EXPLORE.iter().enumerate() {
-                let active = route == Route::Explore(i);
-                col = col.child(
-                    row(SharedString::from(format!("s-ex-{i}")), ic(icons.get(i).copied().unwrap_or("compass"), active), name.to_string(), active)
-                        .on_click(cx.listener(move |this, _, window, cx| this.go(Route::Explore(i), window, cx))),
                 );
             }
         }
@@ -2718,38 +3091,82 @@ impl AppView {
             Dialog::WebSignIn => self.render_web_sign_in(cx),
             Dialog::SaveToPlaylist(v) => {
                 let v = v.clone();
-                let pls = store::playlists();
+                enum Target {
+                    Local(store::LocalPlaylist),
+                    Remote(crate::api::types::PlaylistItem, bool),
+                }
+                let mut targets: Vec<Target> = store::playlists().into_iter().map(Target::Local).collect();
+                if crate::api::auth::signed_in() {
+                    for cp in store::account_playlists() {
+                        targets.push(Target::Remote(cp.item, cp.pinned));
+                    }
+                }
+                // pinned playlists first, everything else keeps its order
+                targets.sort_by_key(|t| !matches!(t, Target::Remote(_, true)));
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
                     .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child("Save video to…"))
-                    .children(pls.into_iter().map(|pl| {
-                        let contains = store::playlist_contains(pl.id, &v.id);
-                        let v2 = v.clone();
-                        div()
-                            .id(SharedString::from(format!("dlg-pl-{}", pl.id)))
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .py_2()
-                            .px_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover))
-                            .child(icon(if contains { "square-check" } else { "square" }).text_color(p.text))
-                            .child(div().flex_1().text_sm().text_color(p.text).child(pl.name.clone()))
-                            .child(icon(if pl.protected { "lock" } else { "globe-lock" }).size_4().text_color(p.text3))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if store::playlist_contains(pl.id, &v2.id) {
-                                    store::playlist_remove(pl.id, &v2.id);
-                                    toast(cx, format!("Removed from {}", pl.name));
-                                } else {
-                                    store::playlist_add(pl.id, &v2);
-                                    toast(cx, format!("Saved to {}", pl.name));
-                                }
-                                cx.notify();
-                            }))
+                    .children(targets.into_iter().map(|target| match target {
+                        Target::Local(pl) => {
+                            let contains = store::playlist_contains(pl.id, &v.id);
+                            let v2 = v.clone();
+                            div()
+                                .id(SharedString::from(format!("dlg-pl-{}", pl.id)))
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .py_2()
+                                .px_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(p.hover))
+                                .child(icon(if contains { "square-check" } else { "square" }).text_color(p.text))
+                                .child(div().flex_1().text_sm().text_color(p.text).child(pl.name.clone()))
+                                .child(icon(if pl.protected { "lock" } else { "globe-lock" }).size_4().text_color(p.text3))
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    if store::playlist_contains(pl.id, &v2.id) {
+                                        store::playlist_remove(pl.id, &v2.id);
+                                        toast(cx, format!("Removed from {}", pl.name));
+                                    } else {
+                                        store::playlist_add(pl.id, &v2);
+                                        toast(cx, format!("Saved to {}", pl.name));
+                                    }
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        }
+                        Target::Remote(pl, pinned) => {
+                            let pid = pl.id.clone();
+                            let vid = v.id.clone();
+                            let name = pl.title.clone();
+                            div()
+                                .id(SharedString::from(format!("dlg-ytpl-{}", pl.id)))
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .py_2()
+                                .px_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(p.hover))
+                                .child(icon("list-video").text_color(p.text))
+                                .child(div().flex_1().text_sm().text_color(p.text).child(name.clone()))
+                                .when(pinned, |d| d.child(icon("pin").size_4().text_color(p.text3)))
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    let (pid, vid, name) = (pid.clone(), vid.clone(), name.clone());
+                                    cx.spawn(async move |this, cx| {
+                                        let res = blocking(move || crate::api::auth::playlist_add(&pid, &vid)).await;
+                                        let _ = this.update(cx, |_, cx| match res {
+                                            Ok(()) => toast(cx, format!("Saved to {name}")),
+                                            Err(e) => toast(cx, format!("Could not save: {e}")),
+                                        });
+                                    })
+                                    .detach();
+                                }))
+                                .into_any_element()
+                        }
                     }))
                     .child(
                         div()
@@ -2932,13 +3349,61 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::add(&crate::perf::APP_RENDERS, 1);
         crate::display::mark_drawn();
+        // A left+right press anywhere opens the tab grid, even over elements
+        // that stop mouse propagation. Registered in a paint callback because
+        // window listeners may only be added during paint.
+        let chord = {
+            let weak = cx.entity().downgrade();
+            canvas(
+                move |_, _, _| weak,
+                |_, weak, window, cx| {
+                    let _ = cx;
+                    let down = weak.clone();
+                    window.on_mouse_event(move |ev: &gpui_kit::MouseDownEvent, phase, _, cx| {
+                        if phase != gpui_kit::DispatchPhase::Bubble {
+                            return;
+                        }
+                        let left = ev.button == MouseButton::Left;
+                        let right = ev.button == MouseButton::Right;
+                        if !left && !right {
+                            return;
+                        }
+                        if let Some(a) = down.upgrade() {
+                            a.update(cx, |a, cx| a.mouse_button(left, cx));
+                        }
+                    });
+                    let up = weak;
+                    window.on_mouse_event(move |ev: &gpui_kit::MouseUpEvent, phase, _, cx| {
+                        if phase != gpui_kit::DispatchPhase::Bubble {
+                            return;
+                        }
+                        let left = ev.button == MouseButton::Left;
+                        let right = ev.button == MouseButton::Right;
+                        if !left && !right {
+                            return;
+                        }
+                        if let Some(a) = up.upgrade() {
+                            a.update(cx, |a, _| {
+                                if left {
+                                    a.left_down = false;
+                                } else {
+                                    a.right_down = false;
+                                }
+                            });
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0()
+        };
         {
             static FIRST: std::sync::Once = std::sync::Once::new();
             FIRST.call_once(|| crate::perf::mark("first frame"));
         }
         if std::mem::take(&mut self.reload_page) {
             // account changed: feeds that depend on it are rebuilt (the watch page keeps playing)
-            if matches!(self.route, Route::Home | Route::Subscriptions | Route::Channels) {
+            if matches!(self.route, Route::Home | Route::Subscriptions(_) | Route::Channels) {
                 self.page = build_page(&self.route, window, cx);
             }
         }
@@ -3047,6 +3512,8 @@ impl Render for AppView {
             root = root.children(self.render_drawer(cx));
         }
         root = root.children(self.render_dl_panel(cx));
+        root = root.child(chord).child(crate::ui::widgets::autoscroll_layer());
+        root = root.children(self.render_tab_grid(cx));
         root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(self.render_toasts(cx));
         root
     }
@@ -3089,11 +3556,8 @@ fn strip_download_section(notes: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
-/// Brings a minimized window back (leaves maximized/normal windows as they are).
+/// Brings a minimized window back, or a hidden one (the tray) on screen.
 pub fn restore_window(window: &mut Window) {
-    if !window_minimized(window) {
-        return;
-    }
     #[cfg(windows)]
     {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -3101,13 +3565,40 @@ pub fn restore_window(window: &mut Window) {
         unsafe extern "system" {
             fn ShowWindowAsync(hwnd: isize, cmd: i32) -> i32;
         }
+        const SW_RESTORE: i32 = 9;
+        const SW_SHOW: i32 = 5;
+        let cmd = if window_minimized(window) {
+            SW_RESTORE
+        } else if window_hidden(window) {
+            SW_SHOW
+        } else {
+            return;
+        };
         if let Ok(h) = HasWindowHandle::window_handle(&*window) {
             if let RawWindowHandle::Win32(w) = h.as_raw() {
-                const SW_RESTORE: i32 = 9;
-                unsafe { ShowWindowAsync(w.hwnd.get(), SW_RESTORE) };
+                unsafe { ShowWindowAsync(w.hwnd.get(), cmd) };
             }
         }
     }
+}
+
+/// Brings the window back from the tray and to the front.
+pub fn show_window(window: &mut Window) {
+    restore_window(window);
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn SetForegroundWindow(hwnd: isize) -> i32;
+        }
+        if let Ok(h) = HasWindowHandle::window_handle(&*window) {
+            if let RawWindowHandle::Win32(w) = h.as_raw() {
+                unsafe { SetForegroundWindow(w.hwnd.get()) };
+            }
+        }
+    }
+    window.activate_window();
 }
 
 /// Empty top-bar space that moves the window (with snap and double-click maximize).
@@ -3143,7 +3634,9 @@ fn window_controls(maximized: bool, cx: &App) -> impl IntoElement {
                     WindowControlArea::Max => toggle_maximize(window),
                     WindowControlArea::Close => {
                         crate::save_window_bounds(window);
-                        window.remove_window();
+                        if !crate::tray::hide_to_tray(window) {
+                            window.remove_window();
+                        }
                     }
                     WindowControlArea::Drag => {}
                 }
@@ -3161,9 +3654,8 @@ fn window_controls(maximized: bool, cx: &App) -> impl IntoElement {
 fn build_page(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
     match route {
         Route::Home => cx.new(|cx| home::HomePage::new(0, window, cx)).into(),
-        Route::Explore(i) => cx.new(|cx| home::HomePage::new(i + 1, window, cx)).into(),
         Route::Shorts(id) => cx.new(|cx| shorts::ShortsPage::new(id.clone(), window, cx)).into(),
-        Route::Subscriptions => cx.new(|cx| subscriptions::FeedPage::new(window, cx)).into(),
+        Route::Subscriptions(profile) => cx.new(|cx| subscriptions::FeedPage::new(*profile, window, cx)).into(),
         Route::Channels => cx.new(|cx| subscriptions::ChannelsPage::new(window, cx)).into(),
         Route::History => cx.new(|cx| library::HistoryPage::new(window, cx)).into(),
         Route::Library => cx.new(|cx| library::LibraryPage::new(window, cx)).into(),
@@ -3236,6 +3728,29 @@ fn window_minimized(window: &Window) -> bool {
     {
         let _ = window;
         true
+    }
+}
+
+/// True when the window was hidden (e.g. sent to the tray).
+fn window_hidden(window: &Window) -> bool {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn IsWindowVisible(hwnd: isize) -> i32;
+        }
+        if let Ok(h) = HasWindowHandle::window_handle(window) {
+            if let RawWindowHandle::Win32(w) = h.as_raw() {
+                return unsafe { IsWindowVisible(w.hwnd.get()) } == 0;
+            }
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        false
     }
 }
 

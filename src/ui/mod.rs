@@ -238,6 +238,22 @@ pub fn icon_button(id: impl Into<ElementId>, name: &str, cx: &App) -> Stateful<D
         .child(icon(name).text_color(p.text))
 }
 
+/// Small rounded-square icon button for overlays on media (thumbnails, posters).
+pub fn icon_square(id: impl Into<ElementId>, name: &str) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size_8()
+        .rounded_md()
+        .bg(hsla(0., 0., 0., 0.65))
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(0., 0., 0., 0.85)))
+        .child(icon(name).size_4().text_color(white()))
+}
+
 /// Pill button with optional icon.
 pub fn pill(id: impl Into<ElementId>, icon_name: Option<&str>, label: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
     let p = pal(cx);
@@ -386,6 +402,43 @@ pub fn avatar(url: Option<&str>, size: Pixels, name: &str, cx: &App) -> AnyEleme
 pub fn copy_to_clipboard(text: String, cx: &mut App) {
     cx.write_to_clipboard(ClipboardItem::new_string(text));
     toast(cx, "Link copied to clipboard");
+}
+
+/// Fetches an image URL and puts the image itself on the clipboard.
+pub fn copy_image_to_clipboard(url: String, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let fetched = blocking(move || {
+            let bytes = crate::api::http::get_bytes(&url, &[])?;
+            let format = image::guess_format(&bytes)?;
+            anyhow::Ok((bytes, format))
+        })
+        .await;
+        let _ = cx.update(|cx| {
+            let Ok((bytes, format)) = fetched else {
+                toast(cx, "Couldn't copy image");
+                return;
+            };
+            let Some(format) = gpui_image_format(format) else {
+                toast(cx, "Couldn't copy image");
+                return;
+            };
+            cx.write_to_clipboard(ClipboardItem::new_image(&Image { format, bytes, id: 0 }));
+            toast(cx, "Image copied to clipboard");
+        });
+    })
+    .detach();
+}
+
+fn gpui_image_format(f: image::ImageFormat) -> Option<ImageFormat> {
+    Some(match f {
+        image::ImageFormat::Png => ImageFormat::Png,
+        image::ImageFormat::Jpeg => ImageFormat::Jpeg,
+        image::ImageFormat::WebP => ImageFormat::Webp,
+        image::ImageFormat::Gif => ImageFormat::Gif,
+        image::ImageFormat::Bmp => ImageFormat::Bmp,
+        image::ImageFormat::Tiff => ImageFormat::Tiff,
+        _ => return None,
+    })
 }
 
 /// Brand colors of the Stream Tube logo.

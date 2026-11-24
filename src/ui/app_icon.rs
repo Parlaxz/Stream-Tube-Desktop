@@ -103,7 +103,7 @@ pub fn apply(cx: &mut App) {
 }
 
 #[cfg(windows)]
-fn resource_id(accent: u32) -> u16 {
+pub fn resource_id(accent: u32) -> u16 {
     ACCENTS.iter().position(|a| *a == accent).map(|i| 101 + i as u16).unwrap_or(1)
 }
 

@@ -14,6 +14,24 @@ const WEB: &str = "web:";
 /// actually shows something new (YouTube returns much the same first page).
 static LAST_TOP: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
 
+/// The last home feed while preserve mode is on. The page is rebuilt on refresh
+/// or re-navigation, so the feed lives here instead of only inside the view.
+static PRESERVED: parking_lot::Mutex<Option<Vec<Item>>> = parking_lot::Mutex::new(None);
+
+fn item_id(i: &Item) -> Option<String> {
+    match i {
+        Item::Video(v) => Some(v.id.clone()),
+        _ => None,
+    }
+}
+
+/// Appends only the videos not already shown, so a preserved feed never repeats
+/// a video when a fresh continuation is loaded.
+fn append_new(items: &mut Vec<Item>, more: Vec<Item>) {
+    let mut seen: std::collections::HashSet<String> = items.iter().filter_map(item_id).collect();
+    items.extend(more.into_iter().filter(|i| item_id(i).map(|id| seen.insert(id)).unwrap_or(true)));
+}
+
 fn freshen(items: Vec<Item>) -> Vec<Item> {
     use rand::seq::SliceRandom;
     let last: std::collections::HashSet<String> = LAST_TOP.lock().iter().cloned().collect();
@@ -147,15 +165,28 @@ impl HomePage {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
-        self.items = Load::Loading;
+        // Preserve mode: keep the current feed and only take the fresh feed's
+        // continuation, so scrolling can still append new videos.
+        let preserving = self.chip == 0 && cx.global::<crate::ui::app::UiState>().preserve_home;
+        let snapshot = preserving.then(|| PRESERVED.lock().clone()).flatten();
+        let mut keep_feed = snapshot.is_some();
+        self.items = match snapshot {
+            Some(items) => Load::Ready(items),
+            None => Load::Loading,
+        };
         self.continuation = None;
         self.serial += 1;
         let serial = self.serial;
         let chip = self.chip;
         // at startup, show the last feed right away instead of a spinner
         let mut from_cache = false;
-        if chip == 0 && !STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if !keep_feed && chip == 0 && !STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
             if let Some(items) = cached_home() {
+                // preserve mode keeps this too, so a reload does not replace it
+                if preserving {
+                    *PRESERVED.lock() = Some(items.clone());
+                    keep_feed = true;
+                }
                 self.items = Load::Ready(items);
                 from_cache = true;
             }
@@ -262,19 +293,27 @@ impl HomePage {
                     return;
                 }
                 crate::perf::mark("home feed fetched");
+                // preserve mode: the fetched feed only supplies the continuation;
+                // what is on screen stays, and a failed fetch does not clear it
+                let keeping = chip == 0 && keep_feed && cx.global::<crate::ui::app::UiState>().preserve_home;
                 match res {
                     Ok((items, cont)) => {
-                        if chip == 0 && !items.is_empty() {
+                        if chip == 0 && !items.is_empty() && !keeping {
                             save_home(&items);
                         }
                         // the cached feed stays if the user is already scrolling through it
                         let scrolled = this.scroll.offset().y < px(-40.);
-                        if !(from_cache && scrolled) {
+                        if !keeping && !(from_cache && scrolled) {
                             this.items = Load::Ready(items);
                         }
                         this.continuation = cont;
+                        if chip == 0 {
+                            if let Some(v) = this.items.ready() {
+                                *PRESERVED.lock() = Some(v.clone());
+                            }
+                        }
                     }
-                    Err(_) if from_cache => {}
+                    Err(_) if from_cache || keeping => {}
                     Err(e) => this.items = Load::Error(e.to_string()),
                 }
                 cx.notify();
@@ -310,9 +349,17 @@ impl HomePage {
                 this.loading_more = false;
                 if let Ok(p) = res {
                     if let Some(items) = this.items.ready_mut() {
-                        items.extend(p.items);
+                        // in preserve mode the continuation can come from a fresh
+                        // feed, so only append videos not already shown
+                        append_new(items, p.items);
                     }
                     this.continuation = p.continuation;
+                    // keep the grown feed for the next reload in preserve mode
+                    if this.chip == 0 {
+                        if let Some(v) = this.items.ready() {
+                            *PRESERVED.lock() = Some(v.clone());
+                        }
+                    }
                 } else {
                     this.continuation = None;
                 }
@@ -409,5 +456,29 @@ impl Render for HomePage {
             .flex_col()
             .child(chips.overflow_hidden())
             .child(page_scroll("home-scroll", &self.scroll).child(div().px_6().pt_2().pb_24().child(body)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_new, Item};
+    use crate::api::types::VideoItem;
+
+    fn video(id: &str) -> Item {
+        Item::Video(VideoItem { id: id.into(), ..Default::default() })
+    }
+
+    #[test]
+    fn append_new_skips_videos_already_shown() {
+        let mut items = vec![video("a"), video("b")];
+        append_new(&mut items, vec![video("b"), video("c"), video("a"), video("d")]);
+        let ids: Vec<&str> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Video(v) => Some(v.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["a", "b", "c", "d"]);
     }
 }

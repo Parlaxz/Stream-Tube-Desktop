@@ -11,6 +11,7 @@ mod links;
 mod locale;
 mod player;
 mod store;
+mod tray;
 mod ui;
 mod updater;
 
@@ -52,6 +53,16 @@ pub fn save_window_bounds(window: &Window) {
         "maximized": maximized,
     });
     store::kv_set("window", &v.to_string());
+}
+
+/// Saves what must survive a real quit or restart: window placement and the
+/// current playback position.
+fn save_state(cx: &mut App) {
+    let pip = ui::pip::handle(cx);
+    if let Some(main) = cx.windows().into_iter().find(|w| Some(*w) != pip) {
+        let _ = main.update(cx, |_, window, _| save_window_bounds(window));
+    }
+    player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
 }
 
 fn main() {
@@ -130,5 +141,39 @@ fn main() {
                 }
             })
             .detach();
+            // tray icon: Show / Restart / Exit (X hides the window instead of quitting)
+            if let Some(mut rx) = tray::init() {
+                cx.spawn(async move |cx| {
+                    use futures::StreamExt;
+                    while let Some(event) = rx.next().await {
+                        match event {
+                            tray::TrayEvent::Show => {
+                                let _ = cx.update(|cx| {
+                                    let pip = ui::pip::handle(cx);
+                                    let Some(main) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
+                                    let _ = main.update(cx, |_, window, _| ui::app::show_window(window));
+                                });
+                            }
+                            tray::TrayEvent::Restart => {
+                                let _ = cx.update(|cx| {
+                                    save_state(cx);
+                                    links::forget_instance();
+                                    if let Ok(exe) = std::env::current_exe() {
+                                        let _ = std::process::Command::new(exe).spawn();
+                                    }
+                                    cx.quit();
+                                });
+                            }
+                            tray::TrayEvent::Exit => {
+                                let _ = cx.update(|cx| {
+                                    save_state(cx);
+                                    cx.quit();
+                                });
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }
         });
 }

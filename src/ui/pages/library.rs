@@ -308,7 +308,11 @@ impl LibraryPage {
                 let res = blocking(crate::api::auth::my_playlists).await;
                 let _ = this.update(cx, |t, cx| {
                     t.yt = Some(match res {
-                        Ok(l) => Load::Ready(l),
+                        Ok(l) => {
+                            store::cache_account_playlists(&l);
+                            cx.refresh_windows();
+                            Load::Ready(l)
+                        }
                         Err(e) => Load::Error(e.to_string()),
                     });
                     cx.notify();
@@ -409,7 +413,7 @@ impl Render for LibraryPage {
                     Load::Loading => spinner(cx).into_any_element(),
                     Load::Error(e) => div().text_sm().text_color(p.text2).child(format!("Could not load your YouTube playlists: {e}")).into_any_element(),
                     Load::Ready(l) if l.is_empty() => div().text_sm().text_color(p.text2).child("No playlists on your account yet").into_any_element(),
-                    Load::Ready(l) => grid(l.iter().map(|pl| playlist_card(pl, w, cx)).collect(), width).into_any_element(),
+                    Load::Ready(l) => grid(l.iter().map(|pl| playlist_card(pl, w, Some(store::is_playlist_pinned(&pl.id)), cx)).collect(), width).into_any_element(),
                 }), |d, body| {
                     d.child(div().flex().flex_col().gap_4().child(section_title("Your YouTube playlists", cx)).child(body))
                 })
@@ -421,7 +425,7 @@ impl Render for LibraryPage {
                             .flex_col()
                             .gap_4()
                             .child(section_title("Saved playlists", cx))
-                            .child(grid(saved.iter().map(|pl| playlist_card(pl, w, cx)).collect(), width)),
+                            .child(grid(saved.iter().map(|pl| playlist_card(pl, w, None, cx)).collect(), width)),
                     )
                 }),
         )
