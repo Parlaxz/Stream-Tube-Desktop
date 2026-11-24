@@ -13,3 +13,10 @@
 - **Default speed** box: sets the speed videos start at and what the `G` shortcut applies.
 - Speed control in the playback bar: current speed between `−` and `+` buttons, placed left of the subtitles button behind a vertical divider. The `−`/`+` buttons use the configured step amounts, and clicking the speed opens the speed menu.
 - Each shortcut press shows the same speed popup as before.
+
+### Tabs & Navigation
+
+- **Middle-click** a video or short — on home, subscriptions, search results, or the related/queue list — to open it in a new background tab, same as **Ctrl/Cmd+click**.
+- **Ctrl/Cmd+click** or **middle-click** any sidebar item (Home, Shorts, Subscriptions, History, Playlists, Watch later, Downloads, channels, Explore, Settings) to open it in a new tab. New sidebar items get this automatically.
+- Right-click a video thumbnail opens **Save to playlist**; middle-click now opens the video in a new tab instead of opening that dialog.
+
