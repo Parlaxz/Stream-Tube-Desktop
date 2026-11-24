@@ -3521,6 +3521,9 @@ impl Render for AppView {
         root = root.child(chord).child(crate::ui::widgets::autoscroll_layer());
         root = root.children(self.render_tab_grid(cx));
         root = root.children(self.render_menu(cx)).children(self.render_dialog(cx)).child(self.render_toasts(cx));
+        if let Some(anchor) = crate::ui::widgets::autoscroll_anchor() {
+            root = root.child(crate::ui::widgets::autoscroll_indicator(anchor));
+        }
         root
     }
 }

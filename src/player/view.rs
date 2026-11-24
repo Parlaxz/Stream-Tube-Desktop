@@ -201,6 +201,53 @@ impl Render for PlayerView {
                 })
             });
 
+        // Wheel over the player changes the volume, even while paused. This is
+        // a window listener bounded to the player's area rather than an
+        // `on_scroll` on an element, so it also works in fullscreen where the
+        // player sits outside any page scroll area.
+        let vol_area = self.area.clone();
+        let vol_player = self.player.clone();
+        let vol_area_pre = vol_area.clone();
+        let volume_layer = canvas(
+            move |bounds, _, _| vol_area_pre.set(bounds),
+            move |_, _, window, _| {
+                let player = vol_player.clone();
+                let area = vol_area.clone();
+                window.on_mouse_event(move |ev: &ScrollEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let b = area.get();
+                    if b.size.width <= px(0.) || !b.contains(&ev.position) {
+                        return;
+                    }
+                    let (has_video, volume) = {
+                        let pl = player.read(cx);
+                        (pl.video.is_some(), pl.volume)
+                    };
+                    if !has_video {
+                        return;
+                    }
+                    // one mouse-wheel notch is 3%; touchpads scale by pixels
+                    let step = match ev.delta {
+                        ScrollDelta::Lines(d) => d.y,
+                        ScrollDelta::Pixels(d) => f32::from(d.y) * 0.05,
+                    }
+                    .clamp(-9.0, 9.0);
+                    if step == 0.0 {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    player.update(cx, |p, cx| {
+                        p.set_volume(volume + step as f64);
+                        cx.notify();
+                    });
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
+
         let mut root = div()
             .id(if mini { "player-mini" } else { "player-main" })
             .relative()
@@ -212,26 +259,6 @@ impl Render for PlayerView {
                 if !*h {
                     this.hover_frac = None;
                 }
-                cx.notify();
-            }))
-            // wheel over a playing video changes the volume instead of scrolling the page
-            .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
-                let (paused, has_video, volume) = {
-                    let pl = this.player.read(cx);
-                    (pl.paused, pl.video.is_some(), pl.volume)
-                };
-                if paused || !has_video {
-                    return;
-                }
-                let delta = match ev.delta {
-                    ScrollDelta::Lines(d) => d.y * 2.0,
-                    ScrollDelta::Pixels(d) => f32::from(d.y) / 30.0,
-                };
-                if delta == 0.0 {
-                    return;
-                }
-                cx.stop_propagation();
-                this.player.update(cx, |p, _| p.set_volume(volume + delta as f64));
                 cx.notify();
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
@@ -287,6 +314,7 @@ impl Render for PlayerView {
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| this.finish_drag(cx)),
             )
+            .child(volume_layer)
             .child(surface);
 
         // click layer: pause / double-click fullscreen

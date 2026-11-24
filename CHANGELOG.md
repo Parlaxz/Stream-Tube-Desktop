@@ -29,6 +29,11 @@
 - **Settings → Custom Features → Subscription profiles** adds a **Refresh time** choice (default: 1 hour). A profile's feed reloads when its cache is older than that.
 - **Import profiles** from a PocketTube subscriptions CSV (`Title, Link, Subscribers, Groups`). Grouped channels are subscribed and added to their profiles.
 
+### Player & Scrolling
+
+- **Scroll wheel over the video** changes the volume by 3% per notch. It works while the video is paused and in fullscreen. The up/down arrow keys still change the volume by 5%.
+- **Middle-click empty space** on a page starts browser-style autoscroll. Move the pointer up or down to scroll. The speed follows the distance from the click and has no upper limit. A marker shows where the click was. Another middle click, any other click, or leaving the window stops it.
+
 ### Thumbnails
 
 - The `⋮` menu on video cards and the watch page now has **Copy thumbnail**, below **Copy link**. It copies the thumbnail image itself to the clipboard.

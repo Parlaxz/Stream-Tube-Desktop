@@ -190,6 +190,9 @@ struct AutoScroll {
     pointer: Point<Pixels>,
     handle: ScrollHandle,
     last: std::time::Instant,
+    /// the last frame actually moved the page, so no extra repaint is needed
+    /// when the pointer moves
+    animating: bool,
 }
 
 fn autoscroll_active() -> bool {
@@ -202,7 +205,8 @@ fn autoscroll_start(position: Point<Pixels>) -> bool {
         return false;
     }
     AUTOSCROLL.with(|a| {
-        *a.borrow_mut() = Some(AutoScroll { anchor: position, pointer: position, handle, last: std::time::Instant::now() })
+        *a.borrow_mut() =
+            Some(AutoScroll { anchor: position, pointer: position, handle, last: std::time::Instant::now(), animating: false })
     });
     true
 }
@@ -211,16 +215,45 @@ fn autoscroll_stop() {
     AUTOSCROLL.with(|a| *a.borrow_mut() = None);
 }
 
+/// Where the middle click that started the current autoscroll was.
+pub fn autoscroll_anchor() -> Option<Point<Pixels>> {
+    AUTOSCROLL.with(|a| a.borrow().as_ref().map(|s| s.anchor))
+}
+
+/// The browser-style marker drawn where autoscroll started.
+pub fn autoscroll_indicator(anchor: Point<Pixels>) -> AnyElement {
+    let (x, y) = (f32::from(anchor.x), f32::from(anchor.y));
+    let white = hsla(0., 0., 1., 0.9);
+    div()
+        .absolute()
+        .left(px(x - 22.))
+        .top(px(y - 22.))
+        .size(px(44.))
+        .rounded_full()
+        .bg(hsla(0., 0., 0., 0.55))
+        .border_1()
+        .border_color(hsla(0., 0., 1., 0.55))
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .child(icon("chevron-up").size_3().text_color(white))
+        .child(div().size(px(6.)).rounded_full().bg(white))
+        .child(icon("chevron-down").size_3().text_color(white))
+        .into_any_element()
+}
+
 /// Autoscroll speed in pixels per second for a pointer `dy` pixels from the
-/// anchor; positive means down. Zero inside the dead zone.
+/// anchor; positive means down. Zero inside the dead zone, and no upper limit:
+/// the farther the pointer, the faster it scrolls.
 fn autoscroll_speed(dy: f32) -> f32 {
     /// no scrolling closer than this to the anchor, like a browser's dead zone
     const DEAD_ZONE: f32 = 18.0;
     /// pixels per second of scroll per pixel away from the anchor
     const SPEED: f32 = 6.5;
-    const MAX_SPEED: f32 = 2000.0;
     let d = (dy.abs() - DEAD_ZONE).max(0.0);
-    (d * SPEED).min(MAX_SPEED) * dy.signum()
+    d * SPEED * dy.signum()
 }
 
 /// Moves the page a little if a middle-click autoscroll is active. Returns true
@@ -235,18 +268,18 @@ fn autoscroll_advance() -> bool {
         let dy: f32 = (s.pointer.y - s.anchor.y).into();
         let speed = autoscroll_speed(dy);
         if speed == 0.0 {
+            s.animating = false;
             return false;
         }
         let step = speed * dt;
         let max: f32 = s.handle.max_offset().y.into();
         let cur: f32 = s.handle.offset().y.into();
         let next = (cur - step).clamp(-max.max(0.0), 0.0);
-        if (next - cur).abs() > 0.01 {
+        s.animating = (next - cur).abs() > 0.01;
+        if s.animating {
             s.handle.set_offset(point(s.handle.offset().x, px(next)));
-            true
-        } else {
-            false
         }
+        s.animating
     })
 }
 
@@ -259,27 +292,42 @@ pub fn autoscroll_layer() -> impl IntoElement {
         |_, _, _| {},
         |_, _, window, _| {
             window.on_mouse_event(|ev: &MouseMoveEvent, phase, window, _| {
-                if phase == DispatchPhase::Capture && autoscroll_active() {
-                    AUTOSCROLL.with(|a| {
-                        if let Some(s) = a.borrow_mut().as_mut() {
-                            s.pointer = ev.position;
-                        }
-                    });
+                if phase != DispatchPhase::Capture || !autoscroll_active() {
+                    return;
+                }
+                let animating = AUTOSCROLL.with(|a| {
+                    let mut a = a.borrow_mut();
+                    let Some(s) = a.as_mut() else { return true };
+                    s.pointer = ev.position;
+                    s.animating
+                });
+                // while it is already scrolling, the next frame reads the new
+                // pointer; a repaint here would only add work and stutter
+                if !animating {
                     window.refresh();
                 }
             });
             window.on_mouse_event(|ev: &MouseDownEvent, phase, window, _| match phase {
-                DispatchPhase::Capture if ev.button != MouseButton::Middle => autoscroll_stop(),
+                DispatchPhase::Capture if ev.button != MouseButton::Middle && autoscroll_active() => {
+                    autoscroll_stop();
+                    window.refresh();
+                }
                 DispatchPhase::Bubble if ev.button == MouseButton::Middle => {
                     if autoscroll_active() {
                         autoscroll_stop();
+                        window.refresh();
                     } else if autoscroll_start(ev.position) {
                         window.refresh();
                     }
                 }
                 _ => {}
             });
-            window.on_mouse_event(|_: &MouseExitEvent, _, _, _| autoscroll_stop());
+            window.on_mouse_event(|_: &MouseExitEvent, _, window, _| {
+                if autoscroll_active() {
+                    autoscroll_stop();
+                    window.refresh();
+                }
+            });
         },
     )
     .absolute()
@@ -609,7 +657,8 @@ mod autoscroll_tests {
         assert_eq!(autoscroll_speed(10.0), 0.0);
         assert!(autoscroll_speed(100.0) > 0.0);
         assert!(autoscroll_speed(-100.0) < 0.0);
-        assert_eq!(autoscroll_speed(-10_000.0), -2000.0);
+        // no upper limit: farther away keeps speeding up
+        assert!(autoscroll_speed(2000.0) > autoscroll_speed(500.0));
     }
 }
 
