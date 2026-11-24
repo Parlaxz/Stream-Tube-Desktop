@@ -2554,8 +2554,7 @@ impl AppView {
                             .ml_2()
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, window, cx| this.go(Route::Home, window, cx)))
-                            .child(crate::ui::logo(px(28.)))
-                            .child(crate::ui::wordmark(cx)),
+                            .child(crate::ui::logo(px(28.))),
                     ),
             )
             // only the empty gaps move the window: gpui reports the first matching control

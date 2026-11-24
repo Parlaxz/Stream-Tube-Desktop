@@ -41,6 +41,8 @@ const SECTIONS: &[(Section, &str, &str)] = &[
 
 pub struct SettingsPage {
     section: Section,
+    /// Icon key staged in the App icon card; saved when Save is pressed.
+    app_icon: String,
     scroll: ScrollHandle,
     inputs: Vec<(&'static str, Entity<InputState>)>,
     keyword: Entity<InputState>,
@@ -136,6 +138,7 @@ impl SettingsPage {
         }));
         let mut page = Self {
             section: Section::General,
+            app_icon: s.app_icon.clone(),
             scroll: ScrollHandle::new(),
             inputs,
             keyword,
@@ -409,6 +412,29 @@ fn accent_swatches(cur: u32, cx: &App) -> Div {
     d
 }
 
+/// One picker tile in the App icon card. An empty `key` is the default logo.
+fn icon_tile(id: &'static str, key: &'static str, active: bool, src: String, label: &str, cx: &mut Context<SettingsPage>) -> Stateful<Div> {
+    let p = pal(cx);
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .w(px(86.))
+        .cursor_pointer()
+        .child(
+            div().size(px(56.)).rounded_xl().p(px(3.)).border_2().border_color(if active { p.accent } else { hsla(0., 0., 0., 0.) }).child(
+                img(SharedString::from(src)).size_full().rounded_lg().object_fit(ObjectFit::Contain),
+            ),
+        )
+        .child(div().w_full().text_xs().text_center().text_color(if active { p.text } else { p.text2 }).child(label.to_string()))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.app_icon = key.to_string();
+            cx.notify();
+        }))
+}
+
 fn text_field(st: &Entity<InputState>, w: f32, cx: &App) -> impl IntoElement {
     let p = pal(cx);
     div().w(px(w)).px_3().py_1().rounded_lg().border_1().border_color(p.border).bg(p.bg).child(Input::new(st).appearance(false))
@@ -664,6 +690,45 @@ impl SettingsPage {
                         }),
                         cx,
                     )),
+            )
+            .child(
+                card(cx)
+                    .child(
+                        div()
+                            .pt_2()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.text)
+                            .child("App icon"),
+                    )
+                    .child(stacked_row(
+                        "Icon",
+                        "Window, taskbar and the logo in the app. Pick an icon, then press Save.",
+                        {
+                            let accent = crate::ui::app_icon::icon_accent(s.accent);
+                            let mut grid = div().flex().flex_wrap().gap_2();
+                            grid = grid.child(icon_tile("app-icon-default", "", self.app_icon.is_empty(), format!("brand/logo-{accent:06x}.svg"), "Default", cx));
+                            for it in crate::ui::app_icon::ICONS {
+                                grid = grid.child(icon_tile(it.key, it.key, self.app_icon == it.key, format!("brand/appicon/{}.png", it.key), it.label, cx));
+                            }
+                            grid
+                        },
+                        cx,
+                    ))
+                    .child(
+                        div().flex().justify_end().py_2().child(
+                            pill("app-icon-save", Some("check"), "Save", cx)
+                                .bg(p.accent)
+                                .text_color(white())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let key = this.app_icon.clone();
+                                    store::update_settings(|s| s.app_icon = key);
+                                    after_change("app-icon", window, cx);
+                                    crate::ui::app_icon::apply(cx);
+                                    toast(cx, "App icon saved");
+                                })),
+                        ),
+                    ),
             )
     }
 

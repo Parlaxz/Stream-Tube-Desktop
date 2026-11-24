@@ -14,6 +14,9 @@
 - Speed control in the playback bar: current speed between `−` and `+` buttons, placed left of the subtitles button behind a vertical divider. The `−`/`+` buttons use the configured step amounts, and clicking the speed opens the speed menu.
 - Each shortcut press shows the same speed popup as before.
 - **Read ahead** card: choose the forward and back video buffer sizes in MiB. Each open video tab keeps its own buffer in RAM.
+- **App icon** card: pick the window, taskbar and in-app icon from the 21 ReVanced branding icons (AFN, MMT, Revancify, Vanced, Xisr and more), or keep **Default**. Icons show in a grid; the selected one is outlined and applied with **Save**.
+- The chosen icon is used for the window and taskbar, desktop/Start/taskbar shortcuts, the Linux menu icon, and the logo inside the app.
+- The top bar now shows only the chosen app icon (still opens Home) instead of the "Stream Tube" wordmark.
 
 ### Tabs & Navigation
 

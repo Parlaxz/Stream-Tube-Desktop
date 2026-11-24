@@ -14,6 +14,8 @@ pub struct Settings {
     // Appearance
     pub theme: String,
     pub accent: u32,
+    /// ReVanced branding icon key for the window, taskbar and in-app logo ("" = accent logo).
+    pub app_icon: String,
     pub start_page: String,
     /// "pin" (top-bar pin decides) | "auto" (kept until a manual refresh or app
     /// start) | "off": how the home feed survives a reload.
@@ -160,6 +162,7 @@ impl Default for Settings {
         Self {
             theme: "dark".into(),
             accent: 0xff0033,
+            app_icon: String::new(),
             start_page: "home".into(),
             home_preserve: "pin".into(),
             grid_columns: 0,

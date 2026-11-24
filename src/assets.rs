@@ -21,6 +21,11 @@ impl AssetSource for Assets {
                 return Ok(Some(Cow::Owned(crate::ui::app_icon::logo_svg(accent).into_bytes())));
             }
         }
+        if let Some(key) = path.strip_prefix("brand/appicon/").and_then(|p| p.strip_suffix(".png")) {
+            if let Some(icon) = crate::ui::app_icon::chosen(key) {
+                return Ok(Some(Cow::Borrowed(icon.png)));
+            }
+        }
         if let Some((_, body)) = EXTRA.iter().find(|(p, _)| *p == path) {
             return Ok(Some(Cow::Owned(format!("{SVG_HEAD}{body}</svg>").into_bytes())));
         }

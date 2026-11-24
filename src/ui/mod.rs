@@ -445,22 +445,14 @@ fn gpui_image_format(f: image::ImageFormat) -> Option<ImageFormat> {
 pub const BRAND_PINK: u32 = 0xF0307E;
 pub const BRAND_VIOLET: u32 = 0x7A3CF5;
 
-/// The Stream Tube app logo.
-/// The logo, in the current accent colour.
+/// The Stream Tube app logo: the chosen branding icon, or the accent logo.
 pub fn logo(size: Pixels) -> Img {
-    let accent = app_icon::icon_accent(crate::store::settings_snapshot().accent);
+    let s = crate::store::settings_snapshot();
+    if let Some(path) = app_icon::asset_path(&s.app_icon) {
+        return img(SharedString::from(path)).size(size).flex_none();
+    }
+    let accent = app_icon::icon_accent(s.accent);
     img(SharedString::from(format!("brand/logo-{accent:06x}.svg"))).size(size).flex_none()
 }
 
-/// "Stream Tube" wordmark next to the logo.
-pub fn wordmark(cx: &App) -> Div {
-    let p = pal(cx);
-    div()
-        .flex()
-        .items_baseline()
-        .gap(px(5.))
-        .text_lg()
-        .font_weight(FontWeight::BOLD)
-        .child(div().text_color(p.text).child("Stream"))
-        .child(div().text_color(p.accent).child("Tube"))
-}
+
