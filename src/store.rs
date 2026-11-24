@@ -15,6 +15,9 @@ pub struct Settings {
     pub theme: String,
     pub accent: u32,
     pub start_page: String,
+    /// "pin" (top-bar pin decides) | "auto" (kept until a manual refresh or app
+    /// start) | "off": how the home feed survives a reload.
+    pub home_preserve: String,
     pub grid_columns: u32,
     // Region
     pub region: String,
@@ -158,6 +161,7 @@ impl Default for Settings {
             theme: "dark".into(),
             accent: 0xff0033,
             start_page: "home".into(),
+            home_preserve: "pin".into(),
             grid_columns: 0,
             region: "US".into(),
             language: "en".into(),

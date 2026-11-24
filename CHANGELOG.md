@@ -20,6 +20,14 @@
 - **Ctrl/Cmd+click** or **middle-click** any sidebar item (Home, Shorts, Subscriptions, History, Playlists, Watch later, Downloads, channels, Explore, Settings) to open it in a new tab. New sidebar items get this automatically.
 - Right-click a video thumbnail opens **Save to playlist**; middle-click now opens the video in a new tab instead of opening that dialog.
 
+### Home Page preservation
+
+- The top-bar **pin** keeps the home feed through reloads: while it is on, a refresh keeps the page and scrolling only appends new videos.
+- **Settings → Custom Features → Home Page preservation** chooses the mode:
+  - **Pin button** — the top-bar pin decides (default).
+  - **On hard refresh and close** — the feed is kept, but a manual refresh or an app restart reloads it.
+  - **Off** — reload with the page.
+
 ### Subscription profiles
 
 - Profiles group subscribed channels into separate feeds. Create them under **Subscriptions → Manage**; nothing is uploaded.

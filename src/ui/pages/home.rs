@@ -18,6 +18,12 @@ static LAST_TOP: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::
 /// or re-navigation, so the feed lives here instead of only inside the view.
 static PRESERVED: parking_lot::Mutex<Option<Vec<Item>>> = parking_lot::Mutex::new(None);
 
+/// Drops the preserved feed, so the next load fetches a fresh one (a manual
+/// refresh in the auto mode).
+pub fn clear_preserved() {
+    *PRESERVED.lock() = None;
+}
+
 fn item_id(i: &Item) -> Option<String> {
     match i {
         Item::Video(v) => Some(v.id.clone()),
@@ -166,8 +172,16 @@ impl HomePage {
 
     fn load(&mut self, cx: &mut Context<Self>) {
         // Preserve mode: keep the current feed and only take the fresh feed's
-        // continuation, so scrolling can still append new videos.
-        let preserving = self.chip == 0 && cx.global::<crate::ui::app::UiState>().preserve_home;
+        // continuation, so scrolling can still append new videos. Auto keeps the
+        // feed too, but a manual refresh or an app start reloads it.
+        let mode = store::settings_snapshot().home_preserve.clone();
+        let pin = cx.global::<crate::ui::app::UiState>().preserve_home;
+        let preserving = self.chip == 0
+            && match mode.as_str() {
+                "off" => false,
+                "auto" => true,
+                _ => pin,
+            };
         let snapshot = preserving.then(|| PRESERVED.lock().clone()).flatten();
         let mut keep_feed = snapshot.is_some();
         self.items = match snapshot {
@@ -182,8 +196,8 @@ impl HomePage {
         let mut from_cache = false;
         if !keep_feed && chip == 0 && !STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
             if let Some(items) = cached_home() {
-                // preserve mode keeps this too, so a reload does not replace it
-                if preserving {
+                // only the pin keeps the startup cache; auto reloads at app start
+                if preserving && mode == "pin" {
                     *PRESERVED.lock() = Some(items.clone());
                     keep_feed = true;
                 }
@@ -295,7 +309,13 @@ impl HomePage {
                 crate::perf::mark("home feed fetched");
                 // preserve mode: the fetched feed only supplies the continuation;
                 // what is on screen stays, and a failed fetch does not clear it
-                let keeping = chip == 0 && keep_feed && cx.global::<crate::ui::app::UiState>().preserve_home;
+                let keeping = chip == 0
+                    && keep_feed
+                    && match mode.as_str() {
+                        "off" => false,
+                        "auto" => true,
+                        _ => cx.global::<crate::ui::app::UiState>().preserve_home,
+                    };
                 match res {
                     Ok((items, cont)) => {
                         if chip == 0 && !items.is_empty() && !keeping {

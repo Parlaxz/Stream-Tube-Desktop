@@ -1657,6 +1657,10 @@ impl AppView {
     /// Reloads the current page (the watch page keeps the player going).
     pub fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.set_global(OpenMenu(None));
+        if matches!(self.route, Route::Home) && store::settings_snapshot().home_preserve == "auto" {
+            // auto preservation gives way to an explicit reload of the home page
+            crate::ui::pages::home::clear_preserved();
+        }
         if let Route::Watch { id, playlist, .. } = self.route.clone() {
             let t = player(cx).read(cx).time;
             self.route = Route::Watch { id, playlist, start: Some(t) };
@@ -2287,6 +2291,7 @@ impl AppView {
         let suggestions = if self.show_suggestions { self.all_suggestions() } else { Vec::new() };
         let hist: std::collections::HashSet<String> = self.history_suggestions.iter().cloned().collect();
         let sel = self.sel_suggestion;
+        let preserve_btn = (store::settings_snapshot().home_preserve == "pin").then(|| self.render_preserve_button(cx));
         let maximized = window.is_maximized();
         div()
             .id("topbar")
@@ -2435,7 +2440,7 @@ impl AppView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(self.render_preserve_button(cx))
+                    .children(preserve_btn)
                     .child(self.render_dl_button(cx))
                     .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
                     .child(self.account_button(cx))

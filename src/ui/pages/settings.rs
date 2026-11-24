@@ -545,6 +545,33 @@ impl SettingsPage {
             .gap_6()
             .child(
                 card(cx)
+                    .child(
+                        div()
+                            .pt_2()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.text)
+                            .child("Home Page preservation"),
+                    )
+                    .child(row(
+                        "Mode",
+                        "Pin button: the top-bar pin decides. On hard refresh and close: kept until a manual refresh or an app restart. Off: reload with the page.",
+                        self.choice(
+                            "home-preserve",
+                            &[
+                                ("pin".to_string(), "Pin button"),
+                                ("auto".to_string(), "On hard refresh and close"),
+                                ("off".to_string(), "Off"),
+                            ],
+                            s.home_preserve.clone(),
+                            |s, v| s.home_preserve = v,
+                            cx,
+                        ),
+                        cx,
+                    )),
+            )
+            .child(
+                card(cx)
                     .child(row("Default speed", "Speed at which videos start, and what Reset speed returns to", text_field(&self.input("default_speed"), 80., cx), cx))
                     .child(row(
                         "Increase speed",
