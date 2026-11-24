@@ -76,7 +76,12 @@ set "LATEST=--latest"
 echo %V%| findstr /c:"-" >nul
 if not errorlevel 1 set "PRE=--prerelease"
 if not errorlevel 1 set "LATEST="
-gh release create "v%V%" "dist\StreamTube-%V%-setup.exe" --repo %REPO% --verify-tag --title "Stream Tube %V%" --generate-notes %LATEST% %PRE% || goto :fail
+
+set "NOTES=--generate-notes"
+powershell -NoProfile -Command "$v=$env:ST_VERSION; $t=[IO.File]::ReadAllText('CHANGELOG.md'); $m=[regex]::Match($t,'(?ms)^##\s+'+[regex]::Escape($v)+'\s*\r?\n(.*?)(?=^##\s|\z)'); $b=$m.Groups[1].Value.Trim(); if(-not $m.Success -or $b.Length -eq 0){exit 1}; [IO.File]::WriteAllText('dist\release-notes.md',$b,(New-Object System.Text.UTF8Encoding($false)))"
+if not errorlevel 1 set "NOTES=--notes-file dist\release-notes.md"
+
+gh release create "v%V%" "dist\StreamTube-%V%-setup.exe" --repo %REPO% --verify-tag --title "Stream Tube %V%" %NOTES% %LATEST% %PRE% || goto :fail
 
 echo Done: https://github.com/%REPO%/releases/tag/v%V%
 goto :end

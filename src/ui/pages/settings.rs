@@ -78,6 +78,7 @@ impl SettingsPage {
             ("captions_lang", s.captions_lang.clone(), "en", |s, v| s.captions_lang = v),
             ("sb_min", format!("{}", s.sb_min_duration), "0", |s, v| s.sb_min_duration = v.parse().unwrap_or(0.0)),
             ("sb_user_id", s.sb_user_id.clone(), "Paste your private user ID", |s, v| s.sb_user_id = v),
+            ("sb_skip_key", s.sb_skip_key.to_uppercase(), "Enter", |s, v| s.sb_skip_key = v.trim().to_lowercase()),
             ("speed_up_key", s.speed_up_key.to_uppercase(), "D", |s, v| s.speed_up_key = v.trim().to_lowercase()),
             ("speed_up_step", format!("{}", s.speed_up_step), "0.25", |s, v| s.speed_up_step = v.parse().unwrap_or(0.25)),
             ("speed_down_key", s.speed_down_key.to_uppercase(), "S", |s, v| s.speed_down_key = v.trim().to_lowercase()),
@@ -913,6 +914,12 @@ impl SettingsPage {
         let mut c = card(cx)
             .child(row("Enable SponsorBlock", "", switch("sb", s.sponsorblock, |s, v| s.sponsorblock = v, cx), cx))
             .child(row("Show skip notifications", "With an “Unskip” button", switch("sbn", s.sb_notify, |s, v| s.sb_notify = v, cx), cx))
+            .child(row(
+                "Skip key",
+                "Key that skips the segment when SponsorBlock asks. Enter and Numpad Enter both work",
+                text_field(&self.input("sb_skip_key"), 72., cx),
+                cx,
+            ))
             .child(row("Minimum segment duration (seconds)", "", text_field(&self.input("sb_min"), 100., cx), cx))
             .child(row("Server", "", text_field(&self.input("sb_server"), 320., cx), cx))
             .child(stacked_row(

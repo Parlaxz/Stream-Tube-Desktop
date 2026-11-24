@@ -53,7 +53,7 @@
 ### Player & Scrolling
 
 - **Scroll wheel over the video** changes the volume by 3% per notch. It works while the video is paused and in fullscreen. The up/down arrow keys still change the volume by 5%.
-- **Middle-click empty space** on a page starts browser-style autoscroll. Move the pointer up or down to scroll. The speed follows the distance from the click and has no upper limit. A marker shows where the click was. Another middle click, any other click, or leaving the window stops it.
+- **Middle-click empty space** on a page starts browser-style autoscroll. A middle click on a video still opens it in a new tab instead. Move the pointer up or down to scroll. The speed follows the distance from the click and has no upper limit. A marker shows where the click was. Another middle click, any other click, or leaving the window stops it.
 
 ### Thumbnails
 

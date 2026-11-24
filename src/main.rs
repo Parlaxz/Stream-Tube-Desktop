@@ -10,6 +10,7 @@ mod import;
 mod links;
 mod locale;
 mod player;
+mod room;
 mod store;
 mod tray;
 mod ui;
@@ -98,6 +99,7 @@ fn main() {
             cx.set_global(ui::Pal::new(true, store::settings_snapshot().accent));
             ui::apply_theme(None, cx);
             player::controller::init(cx);
+            room::init(cx);
             perf::mark("player init");
             let opts = WindowOptions {
                 window_bounds: Some(saved_window_bounds(cx)),

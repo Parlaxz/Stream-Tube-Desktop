@@ -142,8 +142,9 @@ pub fn listen() -> Option<futures::channel::mpsc::UnboundedReceiver<String>> {
             if reader.read_line(&mut line).is_err() {
                 continue;
             }
-            // only our own launches speak this
-            let Some(arg) = line.trim_end().strip_prefix("STREAMTUBE ") else { continue };
+            // only our own launches speak this; keep the space after the marker,
+            // an empty argument (plain launch) must still match
+            let Some(arg) = line.trim_end_matches(['\r', '\n']).strip_prefix("STREAMTUBE ") else { continue };
             let _ = (&stream).write_all(b"ok\n");
             if tx.unbounded_send(arg.to_string()).is_err() {
                 break;
@@ -170,5 +171,13 @@ mod tests {
         assert_eq!(normalize("streamtube://https:/youtu.be/abc"), "https://youtu.be/abc");
         assert_eq!(normalize("streamtube://www.youtube.com/watch?v=abc"), "https://www.youtube.com/watch?v=abc");
         assert_eq!(normalize("https://youtu.be/abc"), "https://youtu.be/abc");
+    }
+
+    #[test]
+    fn a_plain_launch_reaches_the_running_instance() {
+        let mut rx = super::listen().expect("listener");
+        // a launch with no link still hands over, so a second copy never opens
+        assert!(super::forward_to_running(""), "a launch without a link must reach the running instance");
+        assert_eq!(rx.try_next().ok().flatten().as_deref(), Some(""));
     }
 }

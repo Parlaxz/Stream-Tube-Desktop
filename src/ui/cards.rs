@@ -132,7 +132,12 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
         .overflow_hidden()
         .bg(p.surface)
         .group(group.clone())
-        .on_aux_click(move |_, window, cx| {
+        .on_aux_click(move |ev, window, cx| {
+            // Right click opens the save dialog; middle click bubbles to the
+            // card so it opens in a new tab.
+            if !ev.is_right_click() {
+                return;
+            }
             cx.stop_propagation();
             crate::ui::app::open_save_dialog(chooser.clone(), window, cx);
         })

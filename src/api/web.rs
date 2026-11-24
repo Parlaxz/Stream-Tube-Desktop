@@ -150,14 +150,56 @@ fn fetch_account_name() -> Result<String> {
     name.or(handle).ok_or_else(|| anyhow!("not signed in"))
 }
 
-/// Regular videos of a page, without the Shorts shelf (its items carry no channel or length).
+/// Videos and Shorts of a page. Shorts shelf items carry no channel, length or
+/// date, so each short is filled from its watch page.
 fn long_videos(p: crate::api::types::Page) -> crate::api::types::Page {
     use crate::api::types::Item;
     let mut seen = std::collections::HashSet::new();
-    crate::api::types::Page {
-        items: p.items.into_iter().filter(|i| matches!(i, Item::Video(v) if !v.is_short && !v.channel_name.is_empty() && seen.insert(v.id.clone()))).collect(),
-        continuation: p.continuation,
+    let mut items: Vec<Item> = p
+        .items
+        .into_iter()
+        .filter(|i| matches!(i, Item::Video(v) if (v.is_short || !v.channel_name.is_empty()) && seen.insert(v.id.clone())))
+        .collect();
+    let shorts: Vec<String> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Video(v) if v.is_short => Some(v.id.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut details = std::collections::HashMap::new();
+    std::thread::scope(|s| {
+        let pending: Vec<_> = shorts
+            .iter()
+            .map(|id| s.spawn(move || (id.clone(), crate::api::innertube::watch_next(id, None).ok())))
+            .collect();
+        for h in pending {
+            if let Ok((id, Some(w))) = h.join() {
+                details.insert(id, w);
+            }
+        }
+    });
+    for i in &mut items {
+        let crate::api::types::Item::Video(v) = i else { continue };
+        let Some(w) = details.get(&v.id) else { continue };
+        if v.channel_name.is_empty() {
+            v.channel_name = w.channel.name.clone();
+        }
+        if v.channel_id.is_none() && !w.channel.id.is_empty() {
+            v.channel_id = Some(w.channel.id.clone());
+        }
+        if v.channel_avatar.is_none() {
+            v.channel_avatar = w.channel.avatar.clone();
+        }
+        if v.views_text.is_none() && !w.views_text.is_empty() {
+            v.views_text = Some(w.views_text.clone());
+        }
+        if v.published_text.is_none() && !w.date_text.is_empty() {
+            v.published_ts = crate::api::json::parse_relative_time(&w.date_text);
+            v.published_text = Some(w.date_text.clone());
+        }
     }
+    crate::api::types::Page { items, continuation: p.continuation }
 }
 
 /// The account's own home feed, the same one youtube.com shows.

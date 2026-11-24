@@ -181,6 +181,9 @@ pub fn nested_scroll(id: impl Into<ElementId>, list: impl IntoElement) -> Statef
 
 // ───────────────────────── middle-click autoscroll ─────────────────────────
 
+/// no scrolling closer than this to the anchor, like a browser's dead zone
+const AUTOSCROLL_DEAD_ZONE: f32 = 18.0;
+
 thread_local! {
     static AUTOSCROLL: std::cell::RefCell<Option<AutoScroll>> = const { std::cell::RefCell::new(None) };
 }
@@ -215,9 +218,24 @@ fn autoscroll_stop() {
     AUTOSCROLL.with(|a| *a.borrow_mut() = None);
 }
 
-/// Where the middle click that started the current autoscroll was.
+/// Cancels autoscroll when a middle click turned out to open a tab instead.
+pub fn autoscroll_cancel() {
+    autoscroll_stop();
+}
+
+/// Where the middle click that started the current autoscroll was. Shown only
+/// once the pointer leaves the dead zone, so a middle click that turns into a
+/// new tab never flashes the marker.
 pub fn autoscroll_anchor() -> Option<Point<Pixels>> {
-    AUTOSCROLL.with(|a| a.borrow().as_ref().map(|s| s.anchor))
+    AUTOSCROLL.with(|a| {
+        a.borrow()
+            .as_ref()
+            .filter(|s| {
+                let dy: f32 = (s.pointer.y - s.anchor.y).into();
+                dy.abs() > AUTOSCROLL_DEAD_ZONE
+            })
+            .map(|s| s.anchor)
+    })
 }
 
 /// The browser-style marker drawn where autoscroll started.
@@ -248,11 +266,9 @@ pub fn autoscroll_indicator(anchor: Point<Pixels>) -> AnyElement {
 /// anchor; positive means down. Zero inside the dead zone, and no upper limit:
 /// the farther the pointer, the faster it scrolls.
 fn autoscroll_speed(dy: f32) -> f32 {
-    /// no scrolling closer than this to the anchor, like a browser's dead zone
-    const DEAD_ZONE: f32 = 18.0;
     /// pixels per second of scroll per pixel away from the anchor
     const SPEED: f32 = 6.5;
-    let d = (dy.abs() - DEAD_ZONE).max(0.0);
+    let d = (dy.abs() - AUTOSCROLL_DEAD_ZONE).max(0.0);
     d * SPEED * dy.signum()
 }
 

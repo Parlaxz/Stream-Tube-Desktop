@@ -66,6 +66,8 @@ pub struct Settings {
     pub sb_actions: HashMap<String, String>,
     pub sb_min_duration: f64,
     pub sb_notify: bool,
+    /// Key that skips the segment when SponsorBlock asks ("enter" = Enter / Numpad Enter).
+    pub sb_skip_key: String,
     pub dearrow_titles: bool,
     pub dearrow_thumbnails: bool,
     pub ryd: bool,
@@ -200,6 +202,7 @@ impl Default for Settings {
             sb_actions: sb,
             sb_min_duration: 0.0,
             sb_notify: true,
+            sb_skip_key: "enter".into(),
             annotations: true,
             always_scrollbars: false,
             dearrow_titles: false,

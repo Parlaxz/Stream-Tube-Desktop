@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::ClickEvent;
 use serde::{Deserialize, Serialize};
 
-// ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ routes ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ───────────────────────── routes ─────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Route {
@@ -27,6 +27,7 @@ pub enum Route {
     Watch { id: String, playlist: Option<String>, start: Option<f64> },
     Settings,
     Downloads,
+    Room,
 }
 
 impl Route {
@@ -44,6 +45,7 @@ impl Route {
             Route::Watch { .. } => "Watch".into(),
             Route::Settings => "Settings".into(),
             Route::Downloads => "Downloads".into(),
+            Route::Room => "Watch party".into(),
         }
     }
 }
@@ -155,6 +157,11 @@ pub fn open_in_new_tab(route: Route, title: Option<String>, channel: Option<Stri
 /// Ctrl/Cmd+left click or a middle click opens `route` in a new tab; a plain
 /// left click navigates in place. Both gestures call this so they behave the same.
 pub fn activate(route: Route, title: Option<String>, channel: Option<String>, ev: &ClickEvent, window: &mut Window, cx: &mut App) {
+    if ev.is_middle_click() {
+        // a middle click on a video opens a tab; it is not an empty-space autoscroll
+        crate::ui::widgets::autoscroll_cancel();
+        window.refresh();
+    }
     if ev.is_middle_click() || (ev.standard_click() && ev.modifiers().secondary(cx)) {
         open_in_new_tab(route, title, channel, false, window, cx);
     } else if ev.standard_click() {
@@ -227,7 +234,7 @@ pub fn play_next(window: &mut Window, cx: &mut App) {
     }
 }
 
-// ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ menus & dialogs ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ───────────────────────── menus & dialogs ─────────────────────────
 
 #[derive(Clone)]
 pub struct MenuItem {
@@ -440,7 +447,7 @@ pub fn confirm(title: &str, body: &str, confirm: &str, window: &mut Window, cx: 
     );
 }
 
-// ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ AppView ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ───────────────────────── AppView ─────────────────────────
 
 /// A tab that isn't the one shown. The shown tab lives in AppView's own
 /// route/page/history fields; switching swaps them with one of these.
@@ -790,7 +797,7 @@ impl AppView {
             reload_page: false,
             drawer_open: false,
             subs_expanded: false,
-            subs_collapsed: false,
+            subs_collapsed: store::kv_get("subs_collapsed").as_deref() == Some("1"),
             playlists_expanded: false,
             dl_panel: false,
             space_down: false,
@@ -1005,7 +1012,7 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().flex().items_center().gap_2().child(spinner(cx)).child(div().text_xs().text_color(p.text3).child("Waiting for sign-inΓÇª")))
+                        .child(div().flex().items_center().gap_2().child(spinner(cx)).child(div().text_xs().text_color(p.text3).child("Waiting for sign-in…")))
                         .child(cancel),
                 )
                 .child(cookies_link);
@@ -1088,7 +1095,7 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_xs().text_color(p.text3).child("Waiting for approvalΓÇª"))
+                        .child(div().text_xs().text_color(p.text3).child("Waiting for approval…"))
                         .child(
                             div()
                                 .flex()
@@ -1113,7 +1120,7 @@ impl AppView {
                     .gap_3()
                     .py_4()
                     .child(spinner(cx))
-                    .child(div().text_sm().text_color(p.text2).child("Getting a codeΓÇª")),
+                    .child(div().text_sm().text_color(p.text2).child("Getting a code…")),
             );
         }
         col.into_any_element()
@@ -1159,7 +1166,7 @@ impl AppView {
             .child(crate::ui::avatar(acc.avatar.as_deref(), px(30.), &acc.name, cx))
             .on_click(move |ev, window, cx| {
                 let label = match &acc.handle {
-                    Some(h) => format!("{}  ┬╖  {}", acc.name, h),
+                    Some(h) => format!("{}  ·  {}", acc.name, h),
                     None => acc.name.clone(),
                 };
                 let handle = acc.handle.clone();
@@ -1261,7 +1268,7 @@ impl AppView {
         }
     }
 
-    // ΓöÇΓöÇΓöÇΓöÇΓöÇ tabs ΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ───── tabs ─────
 
     pub fn new_tab(&mut self, route: Route, title: Option<String>, channel: Option<String>, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
         match &route {
@@ -1393,6 +1400,7 @@ impl AppView {
             Route::Watch { .. } => "play",
             Route::Settings => "settings",
             Route::Downloads => "download",
+            Route::Room => "users",
         }
     }
 
@@ -2028,10 +2036,10 @@ impl AppView {
             let id = j.id;
             let title = if j.video.title.is_empty() { j.video.id.clone() } else { j.video.title.clone() };
             let (line, color, running) = match &j.status {
-                JobStatus::Queued => ("WaitingΓÇª".to_string(), p.text2, true),
-                JobStatus::Running => (format!("{:.0}%  {}", j.progress * 100.0, j.detail.split("at").nth(1).map(|s| format!("┬╖ {}", s.trim())).unwrap_or_default()), p.text2, true),
+                JobStatus::Queued => ("Waiting…".to_string(), p.text2, true),
+                JobStatus::Running => (format!("{:.0}%  {}", j.progress * 100.0, j.detail.split("at").nth(1).map(|s| format!("· {}", s.trim())).unwrap_or_default()), p.text2, true),
                 JobStatus::Done(path) => (
-                    std::fs::metadata(path).map(|m| format!("{:.1} MB ┬╖ {}", m.len() as f64 / 1e6, j.format)).unwrap_or_else(|_| "File missing".into()),
+                    std::fs::metadata(path).map(|m| format!("{:.1} MB · {}", m.len() as f64 / 1e6, j.format)).unwrap_or_else(|_| "File missing".into()),
                     p.text2,
                     false,
                 ),
@@ -2193,7 +2201,7 @@ impl AppView {
         )
     }
 
-    // ΓöÇΓöÇΓöÇΓöÇΓöÇ keyboard ΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ───── keyboard ─────
 
     fn on_key_up(&mut self, ev: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if ev.keystroke.key != "space" || !std::mem::take(&mut self.space_down) {
@@ -2354,6 +2362,7 @@ impl AppView {
         let down_key = cs.speed_down_key.trim().to_lowercase();
         let reset_key = cs.speed_reset_key.trim().to_lowercase();
         let default_key = cs.speed_default_key.trim().to_lowercase();
+        let sb_skip_key = cs.sb_skip_key.trim().to_lowercase();
         let up_step = cs.speed_up_step.max(0.01);
         let down_step = cs.speed_down_step.max(0.01);
         let default_speed = cs.default_speed;
@@ -2363,6 +2372,12 @@ impl AppView {
         }
         let handled = p.update(cx, |pl: &mut Player, cx| {
             let handled = match (k, m.shift) {
+                (sk, false) if pl.sb_prompt.is_some() && !sb_skip_key.is_empty() && sk.eq_ignore_ascii_case(&sb_skip_key) => {
+                    if let Some(seg) = pl.sb_prompt.take() {
+                        pl.seek_to(seg.end);
+                    }
+                    true
+                }
                 ("space", _) => {
                     // acted on at release (tap) or while held (2x)
                     if held {
@@ -2508,7 +2523,7 @@ impl AppView {
         }
     }
 
-    // ΓöÇΓöÇΓöÇΓöÇΓöÇ chrome ΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ───── chrome ─────
 
     fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
@@ -2711,6 +2726,7 @@ impl AppView {
                 .child(rail("r-home", "house", "Home", Route::Home, route == Route::Home, cx))
                 .when(!s.hide_shorts, |d| d.child(rail("r-shorts", "zap", "Shorts", Route::Shorts(None), matches!(route, Route::Shorts(_)), cx)))
                 .child(rail("r-subs", "tv", "Subscriptions", Route::Subscriptions(None), matches!(route, Route::Subscriptions(_)), cx))
+                .child(rail("r-room", "users", "Party", Route::Room, route == Route::Room, cx))
                 .child(rail("r-you", "circle-user", "You", Route::Library, route == Route::Library, cx))
                 .child(rail("r-dl", "download", "Downloads", Route::Downloads, route == Route::Downloads, cx))
                 .into_any_element();
@@ -2776,6 +2792,7 @@ impl AppView {
             .child(entry("s-home", "house", "Home", Route::Home, route == Route::Home, cx))
             .when(!s.hide_shorts, |d| d.child(entry("s-shorts", "zap", "Shorts", Route::Shorts(None), matches!(route, Route::Shorts(_)), cx)))
             .child(entry("s-subs", "tv", "Subscriptions", Route::Subscriptions(None), matches!(route, Route::Subscriptions(_)), cx))
+            .child(entry("s-room", "users", "Watch party", Route::Room, route == Route::Room, cx))
             .child(sep())
             .child(nav_item(
                 heading("You").id("s-you").cursor_pointer().rounded_lg().h(px(38.)).hover(move |s| s.bg(p.hover)).child(icon("chevron-right").size_4().text_color(p.text)),
@@ -2810,6 +2827,46 @@ impl AppView {
             }
         }
 
+        let account = if crate::api::auth::signed_in() { store::account_playlists() } else { Vec::new() };
+        let (pinned, unpinned): (Vec<_>, Vec<_>) = account.into_iter().partition(|c| c.pinned);
+        if !pinned.is_empty() || !unpinned.is_empty() {
+            col = col.child(sep());
+            for cp in pinned {
+                let id = cp.item.id.clone();
+                let active = route == Route::Playlist(id.clone());
+                col = col.child(nav_item(
+                    row(SharedString::from(format!("s-ytpl-{id}")), ic("pin", active), cp.item.title.clone(), active),
+                    Route::Playlist(id),
+                    cx,
+                ));
+            }
+            let shown = if self.playlists_expanded { unpinned.len() } else { 0 };
+            for cp in unpinned.iter().take(shown) {
+                let id = cp.item.id.clone();
+                let active = route == Route::Playlist(id.clone());
+                col = col.child(nav_item(
+                    row(SharedString::from(format!("s-ytpl-{id}")), ic("list-video", active), cp.item.title.clone(), active),
+                    Route::Playlist(id),
+                    cx,
+                ));
+            }
+            if !unpinned.is_empty() {
+                let expanded = self.playlists_expanded;
+                col = col.child(
+                    row(
+                        "s-pls-more".into(),
+                        icon(if expanded { "chevron-up" } else { "chevron-down" }).size_5().text_color(p.text).into_any_element(),
+                        if expanded { "Show fewer".into() } else { format!("Show {} more", unpinned.len()) },
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.playlists_expanded ^= true;
+                        cx.notify();
+                    })),
+                );
+            }
+        }
+
         let subs = store::subscriptions();
         if !subs.is_empty() {
             const SHOWN: usize = 7;
@@ -2833,6 +2890,7 @@ impl AppView {
                             .hover(move |s| s.bg(p.hover))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.subs_collapsed ^= true;
+                                store::kv_set("subs_collapsed", if this.subs_collapsed { "1" } else { "0" });
                                 cx.notify();
                             }))
                             .child(icon(if collapsed { "chevron-right" } else { "chevron-down" }).size_4().text_color(p.text))
@@ -2879,45 +2937,6 @@ impl AppView {
                         })),
                     );
                 }
-            }
-        }
-        let account = if crate::api::auth::signed_in() { store::account_playlists() } else { Vec::new() };
-        let (pinned, unpinned): (Vec<_>, Vec<_>) = account.into_iter().partition(|c| c.pinned);
-        if !pinned.is_empty() || !unpinned.is_empty() {
-            col = col.child(sep());
-            for cp in pinned {
-                let id = cp.item.id.clone();
-                let active = route == Route::Playlist(id.clone());
-                col = col.child(nav_item(
-                    row(SharedString::from(format!("s-ytpl-{id}")), ic("pin", active), cp.item.title.clone(), active),
-                    Route::Playlist(id),
-                    cx,
-                ));
-            }
-            let shown = if self.playlists_expanded { unpinned.len() } else { 0 };
-            for cp in unpinned.iter().take(shown) {
-                let id = cp.item.id.clone();
-                let active = route == Route::Playlist(id.clone());
-                col = col.child(nav_item(
-                    row(SharedString::from(format!("s-ytpl-{id}")), ic("list-video", active), cp.item.title.clone(), active),
-                    Route::Playlist(id),
-                    cx,
-                ));
-            }
-            if !unpinned.is_empty() {
-                let expanded = self.playlists_expanded;
-                col = col.child(
-                    row(
-                        "s-pls-more".into(),
-                        icon(if expanded { "chevron-up" } else { "chevron-down" }).size_5().text_color(p.text).into_any_element(),
-                        if expanded { "Show fewer".into() } else { format!("Show {} more", unpinned.len()) },
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.playlists_expanded ^= true;
-                        cx.notify();
-                    })),
-                );
             }
         }
         col = col
@@ -3140,7 +3159,7 @@ impl AppView {
         let mut notes = strip_download_section(&rel.notes.replace("\r\n", "\n"));
         if notes.chars().count() > 1400 {
             let cut: String = notes.chars().take(1400).collect();
-            notes = cut.rsplit_once('\n').map(|(a, _)| a.to_string()).unwrap_or(cut) + "\n\nΓÇª";
+            notes = cut.rsplit_once('\n').map(|(a, _)| a.to_string()).unwrap_or(cut) + "\n\n…";
         }
         let has_installer = cfg!(windows) && rel.asset.is_some();
         let size = rel.asset.as_ref().map(|a| a.size).filter(|s| *s > 0).map(|s| format!("{:.0} MB", s as f64 / 1_048_576.0));
@@ -3203,7 +3222,7 @@ impl AppView {
                     .child("New version"),
             )
             .child(div().text_3xl().font_weight(FontWeight::BOLD).text_color(white()).child(format!("Stream Tube {version}")))
-            .child(div().text_sm().text_color(hsla(0., 0., 1., 0.85)).child(meta.join("  ┬╖  ")));
+            .child(div().text_sm().text_color(hsla(0., 0., 1., 0.85)).child(meta.join("  ·  ")));
 
         let mut body = div().flex().flex_col().gap_4().p_6();
         if !notes.trim().is_empty() {
@@ -3233,7 +3252,7 @@ impl AppView {
                             .flex()
                             .justify_between()
                             .text_sm()
-                            .child(div().text_color(p.text).font_weight(FontWeight::MEDIUM).child(if f >= 0.999 { "InstallingΓÇª" } else { "DownloadingΓÇª" }))
+                            .child(div().text_color(p.text).font_weight(FontWeight::MEDIUM).child(if f >= 0.999 { "Installing…" } else { "Downloading…" }))
                             .child(div().text_color(p.text2).child(format!("{:.0}%", f * 100.0))),
                     )
                     .child(
@@ -3480,7 +3499,7 @@ impl AppView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child("Save video toâ€¦"))
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).pb_2().child("Save video to…"))
                     .when(loading, |d| d.child(div().py_6().flex().justify_center().child(spinner(cx))))
                     .children(rows)
                     .child(
@@ -3986,6 +4005,7 @@ fn build_page(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
         }
         Route::Settings => cx.new(|cx| settings::SettingsPage::new(window, cx)).into(),
         Route::Downloads => cx.new(|cx| downloads::DownloadsPage::new(window, cx)).into(),
+        Route::Room => cx.new(|cx| room::RoomPage::new(window, cx)).into(),
     }
 }
 
