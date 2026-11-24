@@ -49,8 +49,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#Root}\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\third_party\mpv\libmpv-2.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; Khronos Vulkan loader, used only when Windows has no vulkan-1.dll (see src/player/mpv.rs)
-Source: "{#Root}\third_party\vulkan\vulkan-1.dll"; DestDir: "{app}\vulkan"; Flags: ignoreversion
-Source: "{#Root}\third_party\vulkan\LICENSE.txt"; DestDir: "{app}\vulkan"; Flags: ignoreversion
+Source: "{#Root}\third_party\vulkan\vulkan-1.dll"; DestDir: "{app}\vulkan"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#Root}\third_party\vulkan\LICENSE.txt"; DestDir: "{app}\vulkan"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#Root}\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
