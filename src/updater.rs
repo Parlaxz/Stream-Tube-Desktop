@@ -10,6 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const REPO: &str = "Avaneesh-Inamdar/Stream-Tube-Desktop";
 pub const RELEASES_PAGE: &str = "https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/releases";
 
+/// This fork updates manually (see `UPSTREAM_SYNC.md`), so upstream installers
+/// must never replace the customized build. Checking is still allowed.
+pub const BINARY_UPDATER_ENABLED: bool = false;
+
 #[derive(Clone, Debug)]
 pub struct Release {
     pub tag: String,
@@ -193,7 +197,7 @@ pub fn check_now(manual: bool, cx: &mut App) {
 
 /// Startup check, a few seconds after launch.
 pub fn check_on_startup(cx: &mut App) {
-    if !store::settings_snapshot().check_updates {
+    if !BINARY_UPDATER_ENABLED || !store::settings_snapshot().check_updates {
         return;
     }
     cx.spawn(async move |cx| {
@@ -216,12 +220,18 @@ pub fn skip(cx: &mut App) {
 }
 
 /// Downloads the new version and starts installing it. On Windows the installer
-/// runs silently, replaces the app and opens it again.
+/// runs silently, replaces the app and opens it again. Disabled in this fork, so
+/// an upstream installer can never overwrite the customized build: the button
+/// opens the release page instead.
 pub fn install(cx: &mut App) {
     let rel = match &cx.default_global::<Updates>().status {
         Status::Available(r) => r.clone(),
         _ => return,
     };
+    if !BINARY_UPDATER_ENABLED {
+        let _ = open::that(&rel.page);
+        return;
+    }
     let Some(Asset { name, url, size, sha256 }) = rel.asset.clone().filter(|_| cfg!(windows)) else {
         // no installer for this platform: the release page has the downloads
         let _ = open::that(&rel.page);

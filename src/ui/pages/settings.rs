@@ -1080,7 +1080,6 @@ impl SettingsPage {
     }
 
     fn about(&self, cx: &mut Context<Self>) -> Div {
-        let s = store::settings_snapshot();
         let mpv = crate::player::mpv::available();
         card(cx)
             .child(row("Stream Tube", &format!("Version {}", env!("CARGO_PKG_VERSION")), div(), cx))
@@ -1090,7 +1089,7 @@ impl SettingsPage {
                 use crate::updater::Status;
                 let status = cx.default_global::<crate::updater::Updates>().status.clone();
                 let text = match &status {
-                    Status::Idle => "Pre-releases included".to_string(),
+                    Status::Idle => "Updates are manual in this fork".to_string(),
                     Status::Checking => "Checking…".to_string(),
                     Status::UpToDate => "You have the latest version".to_string(),
                     Status::Available(r) => format!("{} is available", r.name),
@@ -1103,7 +1102,7 @@ impl SettingsPage {
                 };
                 row("Updates", &text, btn, cx)
             })
-            .child(row("Check for updates at startup", "", switch("upd-auto", s.check_updates, |s, v| s.check_updates = v, cx), cx))
+            .child(row("Automatic updates", "Disabled in this fork; see UPSTREAM_SYNC.md to update manually", div(), cx))
             .child(row("Releases", "Changelog and downloads on GitHub", pill("upd-page", Some("external-link"), "Open", cx).on_click(|_, _, _| {
                 let _ = open::that(crate::updater::RELEASES_PAGE);
             }), cx))
