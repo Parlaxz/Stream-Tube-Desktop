@@ -16,7 +16,7 @@ if /i not "%BRANCH%"=="custom" (
   echo Run this from the custom branch.
   exit /b 1
 )
-for /f "delims=" %%i in ('git status --porcelain --untracked-files=no') do (
+for /f "delims=" %%i in ('git status --porcelain') do (
   echo Working tree is not clean. Commit or stash your changes first.
   exit /b 1
 )

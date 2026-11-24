@@ -12,6 +12,7 @@ Thumbs.db
 
 # installers and packages
 /dist/
+/tools/relay.rar
 
 # built in CI from the Khronos Vulkan-Loader sources
 /third_party/vulkan/
