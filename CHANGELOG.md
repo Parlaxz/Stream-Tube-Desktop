@@ -20,3 +20,13 @@
 - **Ctrl/Cmd+click** or **middle-click** any sidebar item (Home, Shorts, Subscriptions, History, Playlists, Watch later, Downloads, channels, Explore, Settings) to open it in a new tab. New sidebar items get this automatically.
 - Right-click a video thumbnail opens **Save to playlist**; middle-click now opens the video in a new tab instead of opening that dialog.
 
+### Subscription profiles
+
+- Profiles group subscribed channels into separate feeds. Create them under **Subscriptions → Manage**; nothing is uploaded.
+- Profiles appear in the **Subscriptions** feed and in the sidebar. Clicking a sidebar profile opens its feed and refreshes it.
+- The sidebar **Subscriptions** section collapses with a chevron, and the collapsed state is kept between launches.
+- Pinned playlists now sit above **Subscriptions** in the sidebar.
+- **Settings → Custom Features → Subscription profiles** adds a **Refresh time** choice (default: 1 hour). A profile's feed reloads when its cache is older than that.
+- **Import profiles** from a PocketTube subscriptions CSV (`Title, Link, Subscribers, Groups`). Grouped channels are subscribed and added to their profiles.
+
+
