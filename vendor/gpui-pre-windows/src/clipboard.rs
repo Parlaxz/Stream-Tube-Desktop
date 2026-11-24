@@ -216,7 +216,39 @@ fn write_image(item: &Image) -> Result<()> {
             set_clipboard_bytes(&png_bytes, *CLIPBOARD_PNG_FORMAT)?;
         }
     }
+
+    // Stream Tube patch: most Windows apps (Explorer, Paint, .NET, clipboard
+    // history) only paste an image from CF_DIB; the custom JFIF/PNG formats
+    // above are not enough on their own.
+    if let Some(dib) = convert_to_dib(item.bytes(), item.format) {
+        set_clipboard_bytes(&dib, CF_DIB.0 as u32)?;
+    }
     Ok(())
+}
+
+/// A 32-bit BI_RGB DIB (BITMAPINFOHEADER + bottom-up BGRA pixels), the standard
+/// Windows clipboard image format most apps expect.
+fn convert_to_dib(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
+    let img_format = gpui_to_image_format(format)?;
+    let rgba = image::load_from_memory_with_format(bytes, img_format).ok()?.into_rgba8();
+    let (w, h) = rgba.dimensions();
+    let row = w as usize * 4;
+    let mut dib = Vec::with_capacity(40 + row * h as usize);
+    dib.extend_from_slice(&40u32.to_le_bytes()); // biSize
+    dib.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth
+    dib.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight (positive = bottom-up)
+    dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+    dib.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+    dib.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    dib.extend_from_slice(&((row * h as usize) as u32).to_le_bytes()); // biSizeImage
+    dib.extend_from_slice(&[0u8; 16]); // resolution and palette fields
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let p = rgba.get_pixel(x, y);
+            dib.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+        }
+    }
+    Some(dib)
 }
 
 fn convert_to_png(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {

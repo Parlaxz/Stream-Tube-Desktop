@@ -29,4 +29,9 @@
 - **Settings → Custom Features → Subscription profiles** adds a **Refresh time** choice (default: 1 hour). A profile's feed reloads when its cache is older than that.
 - **Import profiles** from a PocketTube subscriptions CSV (`Title, Link, Subscribers, Groups`). Grouped channels are subscribed and added to their profiles.
 
+### Thumbnails
+
+- The `⋮` menu on video cards and the watch page now has **Copy thumbnail**, below **Copy link**. It copies the thumbnail image itself to the clipboard.
+- Copied images also use the standard Windows `CF_DIB` format, so they paste into Explorer, Paint, .NET apps and clipboard history.
+
 

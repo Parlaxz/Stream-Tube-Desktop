@@ -15,5 +15,9 @@ right-to-left text (Arabic, Hebrew, ...) was drawn mirrored.
   `tabs_preserve_native_advances_and_cursor` skip right-to-left strings, since they
   assumed the old left-to-right layout.
 
+- `src/clipboard.rs`: `write_image` also sets a 32-bit `CF_DIB` copy. Without
+  it the clipboard only carried the custom `JFIF`/`PNG` formats, so Explorer,
+  Paint, .NET and clipboard history saw no image to paste.
+
 Every change is marked with "Stream Tube patch". Drop this folder and the
 `[patch.crates-io]` entry in `Cargo.toml` once upstream handles bidi text.
