@@ -2,14 +2,16 @@
 mod api;
 mod assets;
 mod display;
-mod perf;
-mod recommend;
 mod downloads;
 mod feed;
+mod i18n;
+mod idle_inhibit;
 mod import;
 mod links;
 mod locale;
+mod perf;
 mod player;
+mod recommend;
 mod room;
 mod store;
 mod tray;
@@ -21,7 +23,9 @@ use gpui_kit::*;
 /// Window placement from the last session (size, position, maximized), or a
 /// centered default sized to the screen.
 fn saved_window_bounds(cx: &App) -> WindowBounds {
-    if let Some(v) = store::kv_get("window").and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) {
+    if let Some(v) =
+        store::kv_get("window").and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    {
         let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
         let (w, h) = (f("w"), f("h"));
         if w >= 640.0 && h >= 400.0 {
@@ -29,7 +33,11 @@ fn saved_window_bounds(cx: &App) -> WindowBounds {
             // ignore positions that are no longer on any display
             let visible = cx.displays().iter().any(|d| d.bounds().intersects(&b));
             if visible {
-                return if v.get("maximized").and_then(|m| m.as_bool()).unwrap_or(false) {
+                return if v
+                    .get("maximized")
+                    .and_then(|m| m.as_bool())
+                    .unwrap_or(false)
+                {
                     WindowBounds::Maximized(b)
                 } else {
                     WindowBounds::Windowed(b)
@@ -37,8 +45,14 @@ fn saved_window_bounds(cx: &App) -> WindowBounds {
             }
         }
     }
-    let display = cx.primary_display().map(|d| d.bounds().size).unwrap_or(size(px(1600.), px(1000.)));
-    let sz = size((display.width * 0.82).min(px(1600.)), (display.height * 0.85).min(px(1000.)));
+    let display = cx
+        .primary_display()
+        .map(|d| d.bounds().size)
+        .unwrap_or(size(px(1600.), px(1000.)));
+    let sz = size(
+        (display.width * 0.82).min(px(1600.)),
+        (display.height * 0.85).min(px(1000.)),
+    );
     WindowBounds::Windowed(Bounds::centered(None, sz, cx))
 }
 
@@ -93,6 +107,7 @@ fn main() {
         .run(|cx: &mut App| {
             perf::mark("gpui running");
             gpui_kit::init(cx);
+            i18n::apply_component_locale();
             perf::mark("gpui_kit init");
             player::preview::init(cx);
             perf::mark("preview init");
@@ -102,8 +117,15 @@ fn main() {
             room::init(cx);
             perf::mark("player init");
             let opts = WindowOptions {
+                // Without this the Wayland/X11 window has no identity, so docks and
+                // taskbars can't match it to streamtube.desktop (StartupWMClass).
+                app_id: Some("streamtube".into()),
                 window_bounds: Some(saved_window_bounds(cx)),
-                titlebar: Some(TitlebarOptions { title: Some("Stream Tube".into()), appears_transparent: true, ..Default::default() }),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Stream Tube".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
                 window_min_size: Some(size(px(720.), px(480.))),
                 ..Default::default()
             };
@@ -122,7 +144,10 @@ fn main() {
                     while let Some(arg) = rx.next().await {
                         let _ = cx.update(|cx| {
                             let pip = ui::pip::handle(cx);
-                            let Some(main) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
+                            let Some(main) = cx.windows().into_iter().find(|w| Some(*w) != pip)
+                            else {
+                                return;
+                            };
                             let _ = main.update(cx, |_, window, cx| {
                                 ui::app::restore_window(window);
                                 window.activate_window();
@@ -135,11 +160,18 @@ fn main() {
                 })
                 .detach();
             }
-            cx.on_window_closed(|cx, _| {
+            cx.on_app_quit(|cx| {
+                idle_inhibit::release(cx);
+                std::future::ready(())
+            })
+            .detach();
+            cx.on_window_closed(|cx, id| {
+                ui::pip::window_closed(id, cx);
                 // the picture-in-picture window alone doesn't keep the app running
                 let pip = ui::pip::handle(cx);
                 if cx.windows().iter().all(|w| Some(*w) == pip) {
                     player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
+                    idle_inhibit::release(cx);
                     cx.quit();
                 }
             })

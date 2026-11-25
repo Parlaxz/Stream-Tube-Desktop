@@ -5,13 +5,34 @@
 //! this proxy instead, which serves mpv's (possibly open-ended) ranges by
 //! fetching bounded chunks from YouTube, like yt-dlp's chunked downloader.
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 const FIRST_CHUNK: u64 = 1 << 20; // small first chunk: fast start and seeks
 const CHUNK: u64 = 8 << 20;
+
+// Key by the complete signed URL. Keep only immutable VOD playlists here.
+type PlaylistCache = VecDeque<(String, Arc<str>)>;
+static PLAYLISTS: Mutex<PlaylistCache> = Mutex::new(VecDeque::new());
+
+pub(crate) fn remember_vod_playlist(url: &str, text: Arc<str>) {
+    const MAX_BYTES: usize = 8 << 20;
+    if text.len() > MAX_BYTES / 2 || !text.starts_with("#EXTM3U") {
+        return;
+    }
+    let mut cache = PLAYLISTS.lock();
+    if cache.iter().any(|(key, _)| key == url) {
+        return;
+    }
+    let mut bytes = text.len() + cache.iter().map(|(_, p)| p.len()).sum::<usize>();
+    while cache.len() >= 16 || bytes > MAX_BYTES {
+        let Some((_, old)) = cache.pop_front() else { break };
+        bytes -= old.len();
+    }
+    cache.push_back((url.to_owned(), text));
+}
 
 struct Entry {
     url: String,
@@ -21,6 +42,9 @@ struct Entry {
 
 struct Proxy {
     port: u16,
+    /// Any local process can reach a loopback port, so every URL carries this
+    /// secret first and requests without it are refused.
+    token: String,
     streams: Mutex<HashMap<u64, Entry>>,
     next: Mutex<u64>,
 }
@@ -40,9 +64,30 @@ fn proxy() -> Option<&'static Proxy> {
                 }
             })
             .ok()?;
-        Some(Proxy { port, streams: Mutex::new(HashMap::new()), next: Mutex::new(0) })
+        let token = {
+            use rand::Rng;
+            let mut rng = rand::rng();
+            (0..24).map(|_| format!("{:02x}", rng.random::<u8>())).collect()
+        };
+        Some(Proxy { port, token, streams: Mutex::new(HashMap::new()), next: Mutex::new(0) })
     })
     .as_ref()
+}
+
+impl Proxy {
+    /// Where every local URL starts: the port and the secret.
+    fn base(&self) -> String {
+        format!("http://127.0.0.1:{}/{}", self.port, self.token)
+    }
+}
+
+/// The request path after the secret, or None when the secret is missing or wrong.
+fn strip_token<'a>(path: &'a str, token: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix('/')?;
+    let given = rest.get(..token.len())?;
+    let same = given.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+    let rest = &rest[token.len()..];
+    (same && rest.starts_with('/')).then_some(rest)
 }
 
 /// Marks entries served as HLS playlists / plain pass-through instead of ranged media.
@@ -73,7 +118,7 @@ pub fn local_url(url: &str, len: Option<u64>, mime: &str) -> String {
     }
     let Some(p) = proxy() else { return url.to_string() };
     let id = register(p, url, len, mime);
-    format!("http://127.0.0.1:{}/s/{id}", p.port)
+    format!("{}/s/{id}", p.base())
 }
 
 /// Serves an HLS master playlist to mpv through the proxy. Every playlist and
@@ -90,7 +135,32 @@ pub fn local_hls(url: &str, max_height: u32, fps_pref: u32, audio: Option<&str>)
     }
 }
 
-fn hls_attr(line: &str, key: &str) -> Option<String> {
+pub(super) fn playback_hls(url: &str, max_height: u32, audio: Option<&str>, prefer_avc: bool) -> String {
+    let Some(p) = proxy() else { return url.to_string() };
+    let id = register(p, url, None, HLS);
+    let mut url = format!("{}/h/{id}.m3u8?max={max_height}", p.base());
+    if let Some(audio) = audio {
+        url.push_str("&audio=");
+        url.push_str(&crate::api::http::urlencode(audio));
+    }
+    if prefer_avc {
+        url.push_str("&avc=1");
+    }
+    url
+}
+
+/// Serves a single HTTP(S) resource (such as a caption track) through the
+/// authenticated local proxy so mpv uses the app's configured SOCKS/HTTP proxy.
+pub fn local_pass(url: &str) -> String {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return url.to_string();
+    }
+    let Some(p) = proxy() else { return url.to_string() };
+    let id = register(p, url, None, PASS);
+    format!("{}/p/{id}", p.base())
+}
+
+pub(super) fn hls_attr(line: &str, key: &str) -> Option<String> {
     // match KEY= at an attribute boundary (so AUDIO= doesn't hit "VIDEO-RANGE=..."-like names)
     let mut search = line;
     loop {
@@ -107,11 +177,96 @@ fn hls_attr(line: &str, key: &str) -> Option<String> {
     }
 }
 
+/// Resolves a playlist URI against the playlist it came from.
+pub(super) fn playlist_url(base: &str, uri: &str) -> Option<String> {
+    if uri.starts_with("https://") || uri.starts_with("http://") {
+        return Some(uri.to_owned());
+    }
+    let resolved = url::Url::parse(base).ok()?.join(uri).ok()?;
+    matches!(resolved.scheme(), "https" | "http").then(|| resolved.into())
+}
+
+/// Reduces a master playlist to one variant, preferring HDR-free AVC when asked.
+pub(super) fn select_master(text: &str, max_height: u32, audio_name: Option<&str>, prefer_avc: bool) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut header = Vec::new();
+    let mut medias = Vec::new();
+    let mut variants: Vec<(&str, &str)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        if l.starts_with("#EXT-X-STREAM-INF") {
+            if let Some(u) = lines.get(i + 1).filter(|u| !u.starts_with('#')) {
+                variants.push((l, u));
+                i += 2;
+                continue;
+            }
+        } else if l.starts_with("#EXT-X-MEDIA") {
+            medias.push(l);
+        } else if l.starts_with("#EXT-X-I-FRAME-STREAM-INF") || !l.starts_with('#') {
+            // i-frame playlists aren't needed for playback
+        } else {
+            header.push(l);
+        }
+        i += 1;
+    }
+    let class = |l: &str| -> u32 {
+        hls_attr(l, "RESOLUTION")
+            .and_then(|r| r.split_once('x').and_then(|(w, h)| Some(crate::api::streams::quality_class(w.parse().ok()?, h.parse().ok()?))))
+            .unwrap_or(0)
+    };
+    let pref = crate::store::settings_snapshot().codec_pref.clone();
+    let codec_rank = |l: &str| -> u32 {
+        let c = hls_attr(l, "CODECS").unwrap_or_default().to_lowercase();
+        let kind = if c.contains("av01") { "av1" } else if c.contains("vp09") || c.contains("vp9") { "vp9" } else { "h264" };
+        if kind == pref { 3 } else if kind == "h264" { 2 } else { 1 }
+    };
+    let bw = |l: &str| hls_attr(l, "BANDWIDTH").and_then(|b| b.parse::<u64>().ok()).unwrap_or(0);
+    let compatible = |l: &str| prefer_avc && crate::api::streams::is_avc(&hls_attr(l, "CODECS").unwrap_or_default());
+    let fits: Vec<&(&str, &str)> = variants.iter().filter(|(l, _)| max_height == 0 || class(l) <= max_height).collect();
+    let chosen = if fits.is_empty() {
+        variants.iter().min_by_key(|(l, _)| (class(l), bw(l)))
+    } else {
+        fits.into_iter().max_by_key(|(l, _)| {
+            (compatible(l), class(l), !crate::api::streams::is_hdr_codecs(&hls_attr(l, "CODECS").unwrap_or_default()), codec_rank(l), bw(l))
+        })
+    };
+    let (inf, uri) = chosen?;
+    let mut out = String::new();
+    for h in header {
+        out.push_str(h);
+        out.push('\n');
+    }
+    if let Some(group) = hls_attr(inf, "AUDIO") {
+        let in_group: Vec<&&str> = medias
+            .iter()
+            .filter(|m| hls_attr(m, "TYPE").as_deref() == Some("AUDIO") && hls_attr(m, "GROUP-ID").as_deref() == Some(group.as_str()))
+            .collect();
+        // the requested track, else the original, else the default, else the first
+        let name_of = |m: &str| crate::api::streams::hls_media_name(m).unwrap_or_default();
+        let audio = audio_name
+            .and_then(|want| in_group.iter().find(|m| name_of(m) == want))
+            .or_else(|| in_group.iter().find(|m| m.contains("acont=original") || m.contains("acont%3Doriginal") || crate::api::streams::is_original_audio_label(&name_of(m))))
+            .or_else(|| in_group.iter().find(|m| hls_attr(m, "DEFAULT").as_deref() == Some("YES")))
+            .or_else(|| in_group.first())
+            .copied();
+        if let Some(m) = audio {
+            out.push_str(m);
+            out.push('\n');
+        }
+    }
+    out.push_str(inf);
+    out.push('\n');
+    out.push_str(uri);
+    out.push('\n');
+    Some(out)
+}
+
 /// Reduces a master playlist to the one variant mpv should play (best fit for
 /// `max_height` and the codec preference) plus its default audio rendition.
 /// ffmpeg opens every playlist a master lists before starting, so serving the
 /// full master (often 30+ playlists) delays the start by many seconds.
-fn rewrite_master(p: &Proxy, text: &str, max_height: u32, fps_pref: u32, audio_name: Option<&str>) -> String {
+fn rewrite_master(_p: &Proxy, text: &str, max_height: u32, fps_pref: u32, audio_name: Option<&str>) -> String {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let mut header = Vec::new();
     let mut medias = Vec::new();
@@ -154,8 +309,7 @@ fn rewrite_master(p: &Proxy, text: &str, max_height: u32, fps_pref: u32, audio_n
     } else {
         fits.into_iter().max_by_key(|(l, _)| (class(l), fps_match(l), fps(l), codec_rank(l), bw(l)))
     };
-    let Some((inf, uri)) = chosen else { return rewrite_playlist(p, text, max_height) };
-    let local_pl = |u: &str| format!("http://127.0.0.1:{}/h/{}?max=0", p.port, register(p, u, None, HLS));
+    let Some((inf, uri)) = chosen else { return text.to_string() };
     let mut out = String::new();
     for h in header {
         out.push_str(h);
@@ -170,37 +324,43 @@ fn rewrite_master(p: &Proxy, text: &str, max_height: u32, fps_pref: u32, audio_n
         let name_of = |m: &str| crate::api::streams::hls_media_name(m).unwrap_or_default();
         let audio = audio_name
             .and_then(|want| in_group.iter().find(|m| name_of(m) == want))
-            .or_else(|| in_group.iter().find(|m| name_of(m).to_lowercase().contains("original")))
+            .or_else(|| in_group.iter().find(|m| m.contains("acont=original") || m.contains("acont%3Doriginal") || crate::api::streams::is_original_audio_label(&name_of(m))))
             .or_else(|| in_group.iter().find(|m| hls_attr(m, "DEFAULT").as_deref() == Some("YES")))
             .or_else(|| in_group.first())
             .copied();
         if let Some(m) = audio {
-            match (m.find("URI=\""), hls_attr(m, "URI")) {
-                (Some(i), Some(u)) => {
-                    out.push_str(&m[..i + 5]);
-                    out.push_str(&local_pl(&u));
-                    out.push_str(&m[i + 5 + u.len()..]);
-                }
-                _ => out.push_str(m),
-            }
+            out.push_str(m);
             out.push('\n');
         }
     }
     out.push_str(inf);
     out.push('\n');
-    out.push_str(&local_pl(uri));
+    out.push_str(uri);
     out.push('\n');
     out
 }
 
 /// Rewrites one playlist so all its URLs point back at the proxy. Whether a
 /// URI is another playlist or media is decided by the tag it belongs to.
-fn rewrite_playlist(p: &Proxy, text: &str, max_height: u32) -> String {
+fn rewrite_playlist(p: &Proxy, base: &str, text: &str, max_height: u32) -> String {
+    let fragmented_mp4 = text.lines().any(|line| line.trim_start().starts_with("#EXT-X-MAP:"));
     let local = |u: &str, playlist: bool| -> String {
+        let Some(url) = playlist_url(base, u) else {
+            return format!("{}/invalid", p.base());
+        };
         if playlist {
-            format!("http://127.0.0.1:{}/h/{}?max=0", p.port, register(p, u, None, HLS))
+            format!("{}/h/{}.m3u8?max=0", p.base(), register(p, &url, None, HLS))
         } else {
-            format!("http://127.0.0.1:{}/p/{}", p.port, register(p, u, None, PASS))
+            // libavformat checks segment extensions against the detected
+            // container. YouTube often identifies the segment only by a number.
+            let path = url.split(['?', '#']).next().unwrap_or(&url);
+            let extension = path.rsplit('/').next().and_then(|s| s.rsplit_once('.')).map(|(_, ext)| ext);
+            let ext = match extension {
+                Some(ext) if !ext.is_empty() && ext.len() <= 8 && ext.bytes().all(|c| c.is_ascii_alphanumeric()) => ext,
+                _ if fragmented_mp4 => "m4s",
+                _ => "ts",
+            };
+            format!("{}/p/{}.{ext}", p.base(), register(p, &url, None, PASS))
         }
     };
     let lines: Vec<&str> = text.lines().collect();
@@ -259,19 +419,30 @@ fn rewrite_playlist(p: &Proxy, text: &str, max_height: u32) -> String {
 fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, fps_pref: u32, audio: Option<&str>) -> std::io::Result<()> {
     let mut text = None;
     for attempt in 0..3u64 {
+        if text.is_some() {
+            break;
+        }
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300 * attempt));
+        }
         if let Ok(mut r) = agent().get(url).header("User-Agent", crate::api::http::BROWSER_UA).call() {
             if r.status().as_u16() < 400 {
-                text = r.body_mut().with_config().limit(16 << 20).read_to_string().ok();
-                break;
+                if let Ok(body) = r.body_mut().with_config().limit(16 << 20).read_to_string() {
+                    let body: Arc<str> = body.into();
+                    if body.lines().any(|l| l.trim() == "#EXT-X-ENDLIST") {
+                        remember_vod_playlist(url, body.clone());
+                    }
+                    text = Some(body);
+                    break;
+                }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(300 * (attempt + 1)));
     }
     let Some(text) = text else {
         conn.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     };
-    let body = if text.contains("#EXT-X-STREAM-INF") { rewrite_master(p, &text, max_height, fps_pref, audio) } else { rewrite_playlist(p, &text, max_height) };
+    let body = if text.contains("#EXT-X-STREAM-INF") { rewrite_master(p, &text, max_height, fps_pref, audio) } else { rewrite_playlist(p, url, &text, max_height) };
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -283,8 +454,29 @@ fn serve_playlist(conn: &mut TcpStream, p: &Proxy, url: &str, max_height: u32, f
 
 /// Plain pass-through (HLS segments): forwards the request and streams the reply.
 fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>, head_only: bool) -> std::io::Result<()> {
+    if let Some(media) = super::shorts_preload::cached(url) {
+        let total = media.total;
+        let (start, end) = range.unwrap_or((0, None));
+        let end = end.unwrap_or(total - 1).min(total - 1);
+        if start <= end && end < media.bytes.len() as u64 {
+            if range.is_some() {
+                write!(conn, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\n")?;
+            } else {
+                conn.write_all(b"HTTP/1.1 200 OK\r\n")?;
+            }
+            write!(conn, "Content-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", media.mime, end - start + 1)?;
+            if !head_only {
+                conn.write_all(&media.bytes[start as usize..=end as usize])?;
+                media.record_served(end - start + 1);
+            }
+            return conn.flush();
+        }
+    }
     let mut resp = None;
     for attempt in 0..3u64 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300 * attempt));
+        }
         let mut req = agent().get(url).header("User-Agent", crate::api::http::BROWSER_UA);
         let rg;
         if let Some((a, b)) = range {
@@ -299,7 +491,7 @@ fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>
                 resp = Some(r);
                 break;
             }
-            _ => std::thread::sleep(std::time::Duration::from_millis(300 * (attempt + 1))),
+            _ => continue,
         }
     }
     let Some(r) = resp else {
@@ -313,37 +505,55 @@ fn serve_pass(conn: &mut TcpStream, url: &str, range: Option<(u64, Option<u64>)>
         if status == 206 { "Partial Content" } else { "OK" },
         hdr("content-type").unwrap_or_else(|| "application/octet-stream".into())
     );
-    if let Some(l) = hdr("content-length") {
+    let length = hdr("content-length");
+    let can_have_body = status >= 200 && status != 204 && status != 304;
+    let chunked = length.is_none() && can_have_body;
+    if let Some(l) = length {
         head.push_str(&format!("Content-Length: {l}\r\n"));
+    } else if chunked {
+        head.push_str("Transfer-Encoding: chunked\r\n");
     }
     if let Some(cr) = hdr("content-range") {
         head.push_str(&format!("Content-Range: {cr}\r\n"));
     }
     head.push_str("\r\n");
     conn.write_all(head.as_bytes())?;
-    if head_only {
+    if head_only || !can_have_body {
         return Ok(());
     }
     let mut body = r.into_body().into_reader();
+    if chunked {
+        // ureq exposes the decoded body. Give libavformat an explicit end of
+        // segment while still forwarding bytes as soon as they arrive.
+        let mut buf = [0; 32 * 1024];
+        let mut writer = std::io::BufWriter::with_capacity(buf.len() + 32, conn);
+        loop {
+            let n = match body.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            write!(writer, "{n:x}\r\n")?;
+            writer.write_all(&buf[..n])?;
+            writer.write_all(b"\r\n")?;
+            writer.flush()?;
+        }
+        writer.write_all(b"0\r\n\r\n")?;
+        return writer.flush();
+    }
     std::io::copy(&mut body, conn)?;
     conn.flush()
 }
 
-fn agent() -> &'static ureq::Agent {
-    static A: OnceLock<ureq::Agent> = OnceLock::new();
-    A.get_or_init(|| {
-        let mut b = ureq::Agent::config_builder()
+pub(super) fn agent() -> ureq::Agent {
+    static AGENT: crate::api::http::NetworkAgent = crate::api::http::NetworkAgent::new();
+    AGENT.get(&crate::store::settings_snapshot(), |builder| {
+        builder
             .http_status_as_error(false)
-            .ip_family(crate::store::ip_family())
             .timeout_connect(Some(std::time::Duration::from_secs(10)))
-            .timeout_recv_body(Some(std::time::Duration::from_secs(30)));
-        // video data goes through the user's proxy too (HTTP or SOCKS)
-        if let Some(p) = crate::store::proxy_setting() {
-            if let Ok(proxy) = ureq::Proxy::new(&p) {
-                b = b.proxy(Some(proxy));
-            }
-        }
-        b.build().new_agent()
+            .timeout_recv_response(Some(std::time::Duration::from_secs(8)))
+            .timeout_recv_body(Some(std::time::Duration::from_secs(30)))
     })
 }
 
@@ -379,11 +589,14 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
     let Some(p) = proxy() else { return Ok(()) };
+    let Some(path) = strip_token(path, &p.token) else {
+        return conn.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    };
     if crate::perf::on() {
         eprintln!("[proxy] {method} {path} range={range:?}");
     }
     let lookup =|rest: &str| -> Option<String> {
-        let id: u64 = rest.split('?').next()?.parse().ok()?;
+        let id: u64 = rest.split(['?', '.']).next()?.parse().ok()?;
         p.streams.lock().get(&id).map(|e| e.url.clone())
     };
     if let Some(rest) = path.strip_prefix("/h/") {
@@ -409,8 +622,9 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     };
+    let cached = super::shorts_preload::cached(&url);
     if len.is_none() {
-        len = probe_len(&url);
+        len = cached.as_ref().map(|m| m.total).or_else(|| probe_len(&url));
         if let (Some(id), Some(l)) = (id, len) {
             if let Some(e) = p.streams.lock().get_mut(&id) {
                 e.len = Some(l);
@@ -443,6 +657,12 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         return Ok(());
     }
     let mut pos = start;
+    if let Some(media) = cached.filter(|media| media.total == total && start < media.bytes.len() as u64) {
+        let stop = (end + 1).min(media.bytes.len() as u64);
+        conn.write_all(&media.bytes[start as usize..stop as usize])?;
+        media.record_served(stop - start);
+        pos = stop;
+    }
     let mut first = true;
     let mut stalls = 0;
     let mut buf = vec![0u8; 64 * 1024];
@@ -506,4 +726,65 @@ fn serve(mut conn: TcpStream) -> std::io::Result<()> {
         }
     }
     conn.flush()
+}
+
+#[cfg(test)]
+mod token_tests {
+    #[test]
+    fn requests_need_the_secret() {
+        let t = "0123abcd";
+        assert_eq!(super::strip_token("/0123abcd/s/5", t), Some("/s/5"));
+        assert_eq!(super::strip_token("/s/5", t), None);
+        assert_eq!(super::strip_token("/0123abce/s/5", t), None);
+        assert_eq!(super::strip_token("/0123abcds/5", t), None);
+        assert_eq!(super::strip_token("/01", t), None);
+    }
+
+    #[test]
+    fn local_pass_proxies_only_http_urls_with_secret() {
+        assert_eq!(super::local_pass("/tmp/local.vtt"), "/tmp/local.vtt");
+        let proxied = super::local_pass("https://www.youtube.com/api/timedtext?v=abc");
+        let rest = proxied.strip_prefix("http://127.0.0.1:").expect("loopback url");
+        let path = rest.split_once('/').expect("path").1;
+        let (token, tail) = path.split_once('/').expect("token prefix");
+        assert_eq!(token.len(), 48, "48-hex-char session secret");
+        assert!(tail.starts_with("p/"), "pass route: {tail}");
+    }
+}
+
+#[cfg(test)]
+mod live_proxy_tests {
+    use std::io::Read;
+
+    fn get(url: &str) -> (u16, usize) {
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let mut r = agent.get(url).header("Range", "bytes=0-65535").call().unwrap();
+        let status = r.status().as_u16();
+        let mut buf = Vec::new();
+        let _ = r.body_mut().as_reader().take(65536).read_to_end(&mut buf);
+        (status, buf.len())
+    }
+
+    /// A real video through the proxy: served with the secret, refused without it.
+    #[test]
+    #[ignore = "network"]
+    fn serves_real_streams_only_with_the_secret() {
+        for id in ["dQw4w9WgXcQ", "bvMPTXaLq5k"] {
+            let info = crate::api::streams::get_streams(id).unwrap();
+            let url = if let Some(hls) = &info.hls_url {
+                super::local_hls(hls, 720, 0, None)
+            } else {
+                let f = info.video.first().unwrap();
+                super::local_url(&f.url, f.content_length, &f.mime)
+            };
+            assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+            let (status, n) = get(&url);
+            eprintln!("{id}: {} via {} -> {status}, {n} bytes", info.source, &url[..url.len().min(90)]);
+            assert!((200..300).contains(&status) && n > 0, "{id}: {status}");
+            // the same path without the secret
+            let p = super::proxy().unwrap();
+            let bare = url.replacen(&format!("/{}", p.token), "", 1);
+            assert_eq!(get(&bare).0, 403);
+        }
+    }
 }

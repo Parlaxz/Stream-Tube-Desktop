@@ -397,7 +397,7 @@ impl Render for HomePage {
         let has_more = self.continuation.is_some();
         maybe_load_more(&self.scroll, &mut self.loading_more, has_more, cx, |this, cx| this.load_more(cx));
         let width = content_width(cx);
-        let (_, card_w) = grid_columns(width, 300.0);
+        let (_, card_w) = grid_columns(width, 300.0, px(16.));
         let mut chips = div().flex().gap_3().py_3().px_6().bg(p.bg).child(
             chip(
                 "chip-all",

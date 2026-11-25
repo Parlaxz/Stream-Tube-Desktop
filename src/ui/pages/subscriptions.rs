@@ -137,7 +137,7 @@ impl Render for FeedPage {
             self.shown += 60;
         }
         let width = content_width(cx);
-        let (_, card_w) = grid_columns(width, 300.0);
+        let (_, card_w) = grid_columns(width, 300.0, px(16.));
         if store::subscriptions().is_empty() && !crate::api::auth::signed_in() {
             return page_scroll("feed-scroll", &self.scroll)
                 .child(
@@ -225,7 +225,7 @@ impl Render for FeedPage {
         } else if vids.is_empty() {
             empty_state("inbox", "No videos", "", cx).into_any_element()
         } else if kind == Kind::Shorts {
-            let (_, w) = grid_columns(width, 200.0);
+            let (_, w) = grid_columns(width, 200.0, px(16.));
             grid(vids.iter().take(self.shown).map(|v| shorts_card(v, w, cx)).collect(), width).into_any_element()
         } else {
             // group by day buckets like YouTube

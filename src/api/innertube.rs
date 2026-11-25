@@ -84,7 +84,7 @@ fn walk_items(v: &Value, page: &mut Page) {
                             page.items.push(Item::Channel(ch));
                         }
                     }
-                    "playlistRenderer" | "gridPlaylistRenderer" | "radioRenderer" | "compactPlaylistRenderer" => {
+                    "playlistRenderer" | "gridPlaylistRenderer" | "radioRenderer" | "compactPlaylistRenderer" | "gridShowRenderer" => {
                         if let Some(p) = parse_playlist_renderer(c) {
                             page.items.push(Item::Playlist(p));
                         }
@@ -92,6 +92,17 @@ fn walk_items(v: &Value, page: &mut Page) {
                     "continuationItemRenderer" => {
                         if let Some(t) = continuation_token(c) {
                             page.continuation = Some(t);
+                        }
+                    }
+                    // the newer form (playlists since late 2026):
+                    // { trigger, continuationCommand: { innertubeCommand: { continuationCommand: { token } } } }
+                    "continuationItemViewModel" => {
+                        let mut tokens = Vec::new();
+                        if let Some(cmd) = c.get("continuationCommand") {
+                            find_all(cmd, "token", &mut tokens);
+                        }
+                        if let Some(t) = tokens.iter().find_map(|x| x.as_str()) {
+                            page.continuation = Some(t.to_string());
                         }
                     }
                     // Skip noisy sections that duplicate items or are UI chrome.
@@ -130,7 +141,8 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         .to_string();
     let meta = t.pointer("/metadata/tileMetadataRenderer")?;
     let title = meta.get("title").map(text).unwrap_or_default();
-    let thumbnail = t.pointer("/header/tileHeaderRenderer/thumbnail").and_then(best_thumb).unwrap_or_else(|| default_thumb(&id));
+    let images = t.pointer("/header/tileHeaderRenderer/thumbnail");
+    let thumbnail = images.and_then(best_thumb).unwrap_or_else(|| default_thumb(&id));
     let mut overlays = Vec::new();
     find_all(t, "thumbnailOverlayTimeStatusRenderer", &mut overlays);
     let badge = overlays.first().and_then(|o| o.get("text")).map(text);
@@ -171,10 +183,31 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         .cloned();
     let channel_name = parts.iter().find(|p| Some(*p) != views.as_ref() && Some(*p) != published.as_ref()).cloned().unwrap_or_default();
     let duration_secs = badge.as_deref().and_then(parse_duration);
+    // A show (podcast, series) is a tile too: it opens a playlist, its badge counts
+    // episodes instead of giving a length, its title is the show's name and its two lines
+    // are the latest episode and the channel. Show that episode like a video, with the
+    // show and its size where the views would be.
+    // Two kinds: a show page ("VL" + a playlist id), or the latest episode played with
+    // the show's own list ("OL…"), which is what YouTube runs for recommended shows.
+    let show_playlist = t
+        .pointer("/onSelectCommand/browseEndpoint/browseId")
+        .and_then(Value::as_str)
+        .and_then(|b| b.strip_prefix("VL"))
+        .or_else(|| t.pointer("/onSelectCommand/watchEndpoint/playlistId").and_then(Value::as_str).filter(|p| p.starts_with("OL")))
+        .map(str::to_string);
+    let is_show = show_playlist.is_some();
+    let (title, channel_name, views) = if is_show && parts.len() == 2 && views.is_none() && published.is_none() {
+        let size = badge.clone().filter(|_| duration_secs.is_none());
+        let note = [Some(title), size].into_iter().flatten().collect::<Vec<_>>().join(" • ");
+        (parts[0].clone(), parts[1].clone(), Some(note))
+    } else {
+        (title, channel_name, views)
+    };
     Some(VideoItem {
         id,
         title,
         thumbnail,
+        compact_thumbnail: images.and_then(compact_thumb),
         channel_name,
         channel_id,
         duration_text: badge.filter(|_| duration_secs.is_some()),
@@ -182,6 +215,7 @@ pub(crate) fn parse_tile(t: &Value) -> Option<VideoItem> {
         views_text: views,
         published_text: published,
         is_live,
+        playlist_id: show_playlist,
         ..Default::default()
     })
 }
@@ -229,6 +263,7 @@ fn parse_video_renderer(r: &Value) -> Option<VideoItem> {
         .is_some();
     Some(VideoItem {
         thumbnail: r.get("thumbnail").and_then(best_thumb).unwrap_or_else(|| default_thumb(&id)),
+        compact_thumbnail: r.get("thumbnail").and_then(compact_thumb),
         published_ts: published_text.as_deref().and_then(parse_relative_time),
         id,
         title,
@@ -243,6 +278,7 @@ fn parse_video_renderer(r: &Value) -> Option<VideoItem> {
         is_live,
         is_short,
         is_upcoming,
+        playlist_id: None,
     })
 }
 
@@ -302,7 +338,8 @@ fn parse_lockup(l: &Value) -> Option<Item> {
     let thumb_vm = l
         .pointer("/contentImage/thumbnailViewModel")
         .or_else(|| l.pointer("/contentImage/collectionThumbnailViewModel/primaryThumbnail/thumbnailViewModel"));
-    let thumbnail = thumb_vm.and_then(|t| t.get("image")).and_then(best_thumb);
+    let images = thumb_vm.and_then(|t| t.get("image"));
+    let thumbnail = images.and_then(best_thumb);
     // badges (duration / LIVE / "N videos")
     let mut badge_texts = Vec::new();
     if let Some(t) = thumb_vm {
@@ -395,6 +432,7 @@ fn parse_lockup(l: &Value) -> Option<Item> {
             });
             Some(Item::Video(VideoItem {
                 thumbnail: thumbnail.unwrap_or_else(|| default_thumb(&id)),
+                compact_thumbnail: images.and_then(compact_thumb),
                 duration_secs: duration_text.as_deref().and_then(parse_duration),
                 duration_text,
                 published_ts: published.as_deref().and_then(parse_relative_time),
@@ -457,12 +495,18 @@ fn parse_channel_renderer(r: &Value) -> Option<ChannelItem> {
 }
 
 fn parse_playlist_renderer(r: &Value) -> Option<PlaylistItem> {
-    let id = r.get("playlistId")?.as_str()?.to_string();
+    let id = r.get("playlistId").and_then(Value::as_str).or_else(|| {
+        r.pointer("/navigationEndpoint/browseEndpoint/browseId")?
+            .as_str()?
+            .strip_prefix("VL")
+            .filter(|id| !id.is_empty())
+    })?.to_string();
     let thumbnail = r
         .pointer("/thumbnails/0")
         .and_then(best_thumb)
         .or_else(|| r.get("thumbnail").and_then(best_thumb))
-        .or_else(|| r.pointer("/thumbnailRenderer/playlistVideoThumbnailRenderer/thumbnail").and_then(best_thumb));
+        .or_else(|| r.pointer("/thumbnailRenderer/playlistVideoThumbnailRenderer/thumbnail").and_then(best_thumb))
+        .or_else(|| r.pointer("/thumbnailRenderer/showCustomThumbnailRenderer/thumbnail").and_then(best_thumb));
     let owner = r.get("longBylineText").or_else(|| r.get("shortBylineText"));
     Some(PlaylistItem {
         id,
@@ -475,6 +519,7 @@ fn parse_playlist_renderer(r: &Value) -> Option<PlaylistItem> {
             .map(str::to_string),
         video_count_text: opt_text(r.get("videoCountText"))
             .or_else(|| opt_text(r.get("videoCountShortText")))
+            .or_else(|| opt_text(find(r.get("thumbnailOverlays")?, "thumbnailOverlayBottomPanelRenderer")?.get("text")))
             .or_else(|| r.get("videoCount").and_then(Value::as_str).map(|c| format!("{c} videos"))),
         first_video_id: r
             .pointer("/navigationEndpoint/watchEndpoint/videoId")
@@ -587,10 +632,13 @@ pub fn shorts_feed(token: Option<&str>, seed: Option<&str>) -> Result<(Vec<Video
         None => {
             let body = json!({ "params": "CA8%3D", "disablePlayerResponse": true, "inputType": "REEL_WATCH_INPUT_TYPE_SEEDLESS" });
             let r = call("reel/reel_item_watch", body)?;
-            if let Some(id) = r.pointer("/replacementEndpoint/reelWatchEndpoint/videoId").and_then(Value::as_str) {
-                ids.push(id.to_string());
+            let token = r.get("sequenceContinuation").and_then(Value::as_str).ok_or_else(|| anyhow!("no shorts sequence"))?.to_owned();
+            if let Some(id) = r.pointer("/replacementEndpoint/reelWatchEndpoint/videoId").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                // The seed is already playable. The page can request the sequence after showing it.
+                let first = VideoItem { id: id.to_owned(), thumbnail: default_thumb(id), is_short: true, ..Default::default() };
+                return Ok((vec![first], Some(token)));
             }
-            r.get("sequenceContinuation").and_then(Value::as_str).ok_or_else(|| anyhow!("no shorts sequence"))?.to_string()
+            token
         }
     };
     let s = call("reel/reel_watch_sequence", json!({ "sequenceParams": seq }))?;
@@ -696,10 +744,17 @@ pub enum ResolvedUrl {
     Playlist(String),
 }
 
+fn is_video_id(id: &str) -> bool {
+    id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn is_browse_id(id: &str) -> bool {
+    (2..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Fast local parse of common URL shapes before falling back to resolve_url.
 pub fn parse_youtube_url(input: &str) -> Option<ResolvedUrl> {
     let s = input.trim();
-    let is_id = |x: &str| x.len() == 11 && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     if !s.contains("youtu") {
         return None;
     }
@@ -712,27 +767,31 @@ pub fn parse_youtube_url(input: &str) -> Option<ResolvedUrl> {
     };
     if let Some(rest) = s.split("youtu.be/").nth(1) {
         let id: String = rest.chars().take(11).collect();
-        if is_id(&id) {
+        if is_video_id(&id) {
             return Some(ResolvedUrl::Video(id));
         }
     }
     for marker in ["/shorts/", "/live/", "/embed/"] {
         if let Some(rest) = s.split(marker).nth(1) {
             let id: String = rest.chars().take(11).collect();
-            if is_id(&id) {
+            if is_video_id(&id) {
                 return Some(ResolvedUrl::Video(id));
             }
         }
     }
-    if let Some(v) = get_param("v").filter(|v| is_id(v)) {
+    if let Some(v) = get_param("v").filter(|v| is_video_id(v)) {
         return Some(ResolvedUrl::Video(v));
     }
-    if let Some(l) = get_param("list") {
+    // links can come from any web page (streamtube: links), so only take IDs
+    // made of the characters YouTube uses
+    if let Some(l) = get_param("list").filter(|l| is_browse_id(l)) {
         return Some(ResolvedUrl::Playlist(l));
     }
     if let Some(rest) = s.split("/channel/").nth(1) {
-        let id: String = rest.chars().take_while(|c| *c != '/' && *c != '?').collect();
-        return Some(ResolvedUrl::Channel(id));
+        let id: String = rest.chars().take_while(|c| *c != '/' && *c != '?' && *c != '#').collect();
+        if id.starts_with("UC") && is_browse_id(&id) {
+            return Some(ResolvedUrl::Channel(id));
+        }
     }
     None
 }
@@ -795,7 +854,8 @@ pub fn channel(channel_id: &str, tab_params: Option<&str>) -> Result<ChannelPage
                 }
             }
             if !title.is_empty() {
-                tabs.push(ChannelTab { title, params, selected });
+                let kind = tab_kind(tr, &title);
+                tabs.push(ChannelTab { title, kind, params, selected });
             }
         }
     }
@@ -814,6 +874,19 @@ pub fn channel(channel_id: &str, tab_params: Option<&str>) -> Result<ChannelPage
         }
     }
     Ok(ChannelPage { info, banner, tabs, page })
+}
+
+/// A channel tab's kind from its URL ("/@name/videos" -> "videos"). Titles follow
+/// the content language ("Videolar", "Видео"), so they can't tell tabs apart.
+fn tab_kind(tab: &Value, title: &str) -> String {
+    s(tab, "/endpoint/commandMetadata/webCommandMetadata/url")
+        .and_then(|u| u.split('?').next().and_then(|p| p.rsplit('/').next()).map(str::to_ascii_lowercase))
+        .filter(|k| !k.is_empty() && !k.starts_with('@') && !k.starts_with("uc"))
+        .unwrap_or_else(|| match title {
+            "Home" => "featured".into(),
+            "Live" => "streams".into(),
+            other => other.to_ascii_lowercase(),
+        })
 }
 
 /// Just a channel's avatar, for feeds whose items don't include one.
@@ -894,6 +967,64 @@ pub fn playlist(playlist_id: &str) -> Result<PlaylistPage> {
 
 // ───────────────────────── watch / next ─────────────────────────
 
+fn description_link_url(command: &Value) -> Option<String> {
+    if let Some(watch) = command.get("watchEndpoint") {
+        let id = watch.get("videoId")?.as_str().filter(|id| is_video_id(id))?;
+        let mut url = format!("https://www.youtube.com/watch?v={id}");
+        if let Some(list) = watch.get("playlistId").and_then(Value::as_str).filter(|id| is_browse_id(id)) {
+            url.push_str("&list=");
+            url.push_str(list);
+        }
+        if let Some(start) = watch.get("startTimeSeconds").and_then(Value::as_u64).filter(|&start| start > 0) {
+            url.push_str("&t=");
+            url.push_str(&start.to_string());
+        }
+        return Some(url);
+    }
+    let browse = command.pointer("/browseEndpoint/browseId")?.as_str()?;
+    if let Some(list) = browse.strip_prefix("VL").filter(|id| is_browse_id(id)) {
+        Some(format!("https://www.youtube.com/playlist?list={list}"))
+    } else if browse.starts_with("UC") && is_browse_id(browse) {
+        Some(format!("https://www.youtube.com/channel/{browse}"))
+    } else {
+        None
+    }
+}
+
+fn description_links(attributed: &Value, text: &str) -> Vec<DescriptionLink> {
+    let Some(runs) = attributed.get("commandRuns").and_then(Value::as_array) else { return Vec::new() };
+    // YouTube counts UTF-16 code units. A span cannot split a surrogate pair.
+    let offsets: Vec<_> = text
+        .char_indices()
+        .flat_map(|(byte, c)| [Some(byte), None].into_iter().take(c.len_utf16()))
+        .chain([Some(text.len())])
+        .collect();
+    let mut links: Vec<_> = runs
+        .iter()
+        .filter_map(|run| {
+            let start = usize::try_from(run.get("startIndex").map_or(Some(0), Value::as_u64)?).ok()?;
+            let length = usize::try_from(run.get("length")?.as_u64()?).ok()?;
+            let start_byte = (*offsets.get(start)?)?;
+            let end_byte = (*offsets.get(start.checked_add(length)?)?)?;
+            if start_byte == end_byte {
+                return None;
+            }
+            let url = description_link_url(run.pointer("/onTap/innertubeCommand")?)?;
+            Some(DescriptionLink { range: start_byte..end_byte, url })
+        })
+        .collect();
+    links.sort_by_key(|link| link.range.start);
+    let mut end = 0;
+    links.retain(|link| {
+        if link.range.start < end {
+            return false;
+        }
+        end = link.range.end;
+        true
+    });
+    links
+}
+
 pub fn watch_next(video_id: &str, playlist_id: Option<&str>) -> Result<WatchInfo> {
     let mut body = json!({ "videoId": video_id, "contentCheckOk": true, "racyCheckOk": true });
     if let Some(p) = playlist_id {
@@ -965,12 +1096,12 @@ pub fn watch_next(video_id: &str, playlist_id: Option<&str>) -> Result<WatchInfo
                 }
             }
         }
-        w.description = sec
-            .pointer("/attributedDescription/content")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| opt_text(sec.get("description")))
-            .unwrap_or_default();
+        if let Some((attributed, content)) = sec.get("attributedDescription").and_then(|d| Some((d, d.get("content")?.as_str()?))) {
+            w.description = content.to_string();
+            w.description_links = description_links(attributed, content);
+        } else {
+            w.description = opt_text(sec.get("description")).unwrap_or_default();
+        }
     }
     // Related
     if let Some(sr) = results.pointer("/secondaryResults") {
@@ -1321,6 +1452,45 @@ mod tests {
         assert_eq!(parse_youtube_url("https://www.youtube.com/shorts/oImytUi5y-w"), Some(ResolvedUrl::Video("oImytUi5y-w".into())));
     }
 
+    fn description_run(start: u64, length: u64, command: Value) -> Value {
+        json!({ "startIndex": start, "length": length, "onTap": { "innertubeCommand": command } })
+    }
+
+    #[test]
+    fn description_metadata_keeps_link_labels_and_destinations() {
+        let text = "🎬 Video | List | Channel";
+        let runs = json!({ "commandRuns": [
+            description_run(3, 5, json!({ "watchEndpoint": { "videoId": "_0do0jAoJt8", "playlistId": "PLExample", "startTimeSeconds": 42 } })),
+            description_run(11, 4, json!({ "browseEndpoint": { "browseId": "VLPLExample" } })),
+            description_run(18, 7, json!({ "browseEndpoint": { "browseId": "UCExample" } })),
+        ] });
+        let links = description_links(&runs, text);
+        let links: Vec<_> = links.iter().map(|link| (&text[link.range.clone()], link.url.as_str())).collect();
+        assert_eq!(links, [
+            ("Video", "https://www.youtube.com/watch?v=_0do0jAoJt8&list=PLExample&t=42"),
+            ("List", "https://www.youtube.com/playlist?list=PLExample"),
+            ("Channel", "https://www.youtube.com/channel/UCExample"),
+        ]);
+    }
+
+    #[test]
+    fn description_metadata_ignores_invalid_and_overlapping_runs() {
+        let text = "🎬 Video";
+        let watch = json!({ "watchEndpoint": { "videoId": "_0do0jAoJt8" } });
+        let runs = json!({ "commandRuns": [
+            description_run(1, 1, watch.clone()),
+            description_run(3, u64::MAX, watch.clone()),
+            description_run(3, 0, watch.clone()),
+            description_run(3, 5, json!({ "urlEndpoint": { "url": "file:///example" } })),
+            description_run(3, 5, json!({ "browseEndpoint": { "browseId": "VLPLExample&extra=true" } })),
+            description_run(4, 3, watch.clone()),
+            description_run(3, 5, watch),
+        ] });
+        let links = description_links(&runs, text);
+        assert_eq!(links.len(), 1);
+        assert_eq!(&text[links[0].range.clone()], "Video");
+    }
+
     #[test]
     #[ignore]
     fn live_search() {
@@ -1352,7 +1522,7 @@ mod tests {
     fn live_channel_playlist() {
         let c = channel("UCsBjURrPoezykLs9EqgamOA", None).unwrap();
         println!("{:?} tabs={:?}", c.info, c.tabs.iter().map(|t| &t.title).collect::<Vec<_>>());
-        let vt = c.tabs.iter().find(|t| t.title == "Videos").unwrap();
+        let vt = c.tabs.iter().find(|t| t.kind == "videos").unwrap();
         let v = channel("UCsBjURrPoezykLs9EqgamOA", vt.params.as_deref()).unwrap();
         assert!(v.page.items.len() > 10);
         println!("{:#?}", v.page.items[0]);
@@ -1481,6 +1651,166 @@ mod heatmap_tests {
         for id in ["dQw4w9WgXcQ", "kJQP7kiw5Fk", "LXb3EKWsInQ"] {
             let w = super::watch_next(id, None).unwrap();
             println!("{id}: heatmap={} chapters={}", w.heatmap.len(), w.chapters.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use serde_json::json;
+
+    /// A show from the account's home feed: the tile's title is the show, the lines are the
+    /// latest episode and the channel, and the badge counts episodes.
+    #[test]
+    fn a_show_tile_reads_as_its_latest_episode() {
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "rTjvNXrxtas",
+            "onSelectCommand": { "browseEndpoint": { "browseId": "VLPLgZ8mBDMf-VTsBkM3YatTRCblZjbIBN0Q" } },
+            "header": { "tileHeaderRenderer": { "thumbnailOverlays": [
+                { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "13" }, { "text": " episodes" }] } } }
+            ] } },
+            "metadata": { "tileMetadataRenderer": {
+                "title": { "simpleText": "Point" },
+                "lines": [
+                    { "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": "Episode two" } } }] } },
+                    { "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": "Some Channel" } } }] } }
+                ]
+            } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "Episode two");
+        assert_eq!(v.channel_name, "Some Channel");
+        assert_eq!(v.views_text.as_deref(), Some("Point • 13 episodes"));
+        assert!(v.duration_text.is_none());
+        // opening the card shows the show's playlist, without the "VL" of the browse id
+        assert_eq!(v.playlist_id.as_deref(), Some("PLgZ8mBDMf-VTsBkM3YatTRCblZjbIBN0Q"));
+    }
+
+    /// Some shows play their latest episode together with the show's own list.
+    #[test]
+    fn a_show_that_plays_its_own_list_keeps_that_list() {
+        let line = |t: &str| json!({ "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": t } } }] } });
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "9DCrS24Zk-g",
+            "onSelectCommand": { "watchEndpoint": { "videoId": "9DCrS24Zk-g", "playlistId": "OLa8Qyc44XfVYUHLvQqGvlBHDYTk1cx-n6Q" } },
+            "header": { "tileHeaderRenderer": { "thumbnailOverlays": [
+                { "thumbnailOverlayTimeStatusRenderer": { "text": { "runs": [{ "text": "49" }, { "text": " episodes" }] } } }
+            ] } },
+            "metadata": { "tileMetadataRenderer": { "title": { "simpleText": "A show" }, "lines": [line("Episode"), line("Channel")] } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "Episode");
+        assert_eq!(v.channel_name, "Channel");
+        assert_eq!(v.views_text.as_deref(), Some("A show • 49 episodes"));
+        assert_eq!(v.playlist_id.as_deref(), Some("OLa8Qyc44XfVYUHLvQqGvlBHDYTk1cx-n6Q"));
+    }
+
+    /// An ordinary tile keeps its own title, channel, views and date.
+    #[test]
+    fn a_video_tile_is_unchanged() {
+        let line = |t: &str| json!({ "lineRenderer": { "items": [{ "lineItemRenderer": { "text": { "simpleText": t } } }] } });
+        let tile = json!({
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "contentId": "abc",
+            "onSelectCommand": { "watchEndpoint": { "videoId": "abc" } },
+            "metadata": { "tileMetadataRenderer": { "title": { "simpleText": "A video" }, "lines": [line("Some Channel"), line("340K views"), line("4 days ago")] } }
+        });
+        let v = super::parse_tile(&tile).unwrap();
+        assert_eq!(v.title, "A video");
+        assert_eq!(v.channel_name, "Some Channel");
+        assert_eq!(v.views_text.as_deref(), Some("340K views"));
+        assert_eq!(v.published_text.as_deref(), Some("4 days ago"));
+        assert!(v.playlist_id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod long_playlist_tests {
+    #[test]
+    #[ignore = "network"]
+    fn long_playlists_load_and_watch_next_sends_a_window() {
+        let pid = "UUX6OQ3DkcsbYNE6H8uQQuVA";
+        let mut page = super::playlist(pid).unwrap();
+        let mut vids = page.videos.clone();
+        while vids.len() < 420 {
+            let Some(t) = page.continuation.take() else { break };
+            let p = super::browse_continue(&t).unwrap();
+            vids.extend(p.items.into_iter().filter_map(|i| i.as_video().cloned()));
+            page.continuation = p.continuation;
+        }
+        eprintln!("loaded {}", vids.len());
+        // playlists page past their first 100 videos
+        assert!(vids.len() > 300, "only {} videos", vids.len());
+        for at in [0usize, 150, 298, 350] {
+            let Some(v) = vids.get(at) else { continue };
+            let w = super::watch_next(&v.id, Some(pid)).unwrap();
+            let items = w.playlist.map(|p| p.items).unwrap_or_default();
+            let first = items.first().and_then(|f| vids.iter().position(|x| x.id == f.id));
+            let last = items.last().and_then(|f| vids.iter().position(|x| x.id == f.id));
+            let me = items.iter().position(|x| x.id == v.id);
+            eprintln!("at {at}: window {} items, first={first:?} last={last:?} me={me:?}", items.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod channel_tab_tests {
+    use super::{Item, collect_items, json};
+
+    #[test]
+    fn channel_show_cards_keep_the_playlist_id_and_episode_count() {
+        let page = collect_items(&json!({
+            "richGridRenderer": {
+                "contents": [{ "richItemRenderer": { "content": { "gridShowRenderer": {
+                    "title": {"simpleText": "Creator show"},
+                    "navigationEndpoint": { "browseEndpoint": { "browseId": "VLPLExampleShow" } },
+                    "thumbnailRenderer": { "showCustomThumbnailRenderer": { "thumbnail": { "thumbnails": [{
+                        "url": "https://i.ytimg.com/vi/example/hqdefault.jpg", "width": 480, "height": 270
+                    }] } } },
+                    "longBylineText": { "runs": [{ "text": "Creator" }] },
+                    "thumbnailOverlays": [{ "thumbnailOverlayBottomPanelRenderer": {
+                        "text": { "runs": [{ "text": "7" }, { "text": " episodes" }] }
+                    } }]
+                } } } }]
+            }
+        }));
+        let [Item::Playlist(show)] = page.items.as_slice() else { panic!("missing show card") };
+        assert_eq!(show.id, "PLExampleShow");
+        assert_eq!(show.title, "Creator show");
+        assert_eq!(show.channel_name.as_deref(), Some("Creator"));
+        assert_eq!(show.video_count_text.as_deref(), Some("7 episodes"));
+        assert_eq!(show.thumbnail.as_deref(), Some("https://i.ytimg.com/vi/example/hqdefault.jpg"));
+    }
+
+    #[test]
+    #[ignore = "network"]
+    fn channel_show_tabs_open_episode_lists() {
+        for id in ["UCGGZ_POGmIWG1pQXTDzQv-g", "UCPD_bxCRGpmmeQcbe2kpPaA"] {
+            let channel = super::channel(id, Some(crate::feed::VIDEOS_TAB)).unwrap();
+            let tab = channel.tabs.iter().find(|tab| tab.kind == "shows").expect("shows tab");
+            let page = super::channel(id, tab.params.as_deref()).unwrap();
+            let show = page.page.items.iter().find_map(|item| {
+                if let Item::Playlist(show) = item { Some(show) } else { None }
+            }).expect("show card");
+            let episodes = super::playlist(&show.id).unwrap().videos;
+            eprintln!("{}: {} ({} episodes loaded)", channel.info.name, show.title, episodes.len());
+            assert!(!episodes.is_empty());
+        }
+    }
+
+    /// Tabs are told apart by kind in any content language.
+    #[test]
+    #[ignore = "network"]
+    fn channel_tabs_have_kinds_in_other_languages() {
+        crate::store::update_settings(|s| s.language = "tr".into());
+        let page = super::channel("UCBJycsmduvYEL83R_U4JriQ", None).unwrap();
+        crate::store::update_settings(|s| s.language = "en".into());
+        let kinds: Vec<_> = page.tabs.iter().map(|t| (t.title.clone(), t.kind.clone())).collect();
+        eprintln!("{kinds:?}");
+        for k in ["featured", "videos", "shorts", "playlists"] {
+            assert!(kinds.iter().any(|(_, kind)| kind == k), "no {k} tab in {kinds:?}");
         }
     }
 }

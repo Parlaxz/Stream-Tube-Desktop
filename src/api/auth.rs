@@ -9,6 +9,7 @@ use anyhow::{Result, anyhow};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 // Public OAuth client of the YouTube TV app.
 const CLIENT_ID: &str = "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com";
@@ -30,6 +31,8 @@ struct Stored {
     refresh_token: String,
     expires_at: i64,
     account: Option<Account>,
+    #[serde(skip)]
+    session: Arc<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +58,14 @@ fn persist(s: &Option<Stored>) {
 
 pub fn signed_in() -> bool {
     state().lock().as_ref().map(|s| !s.refresh_token.is_empty()).unwrap_or(false)
+}
+
+pub(crate) fn session_identity() -> Option<Arc<()>> {
+    state()
+        .lock()
+        .as_ref()
+        .filter(|s| !s.refresh_token.is_empty())
+        .map(|s| s.session.clone())
 }
 
 pub fn account() -> Option<Account> {
@@ -126,6 +137,7 @@ pub fn poll_login(dc: &DeviceCode) -> Result<PollResult> {
             refresh_token: refresh.to_string(),
             expires_at: crate::api::json::now() + expires - 60,
             account: None,
+            session: Arc::new(()),
         });
         persist(&s);
     }
@@ -631,6 +643,30 @@ pub fn playlist(playlist_id: &str) -> Result<PlaylistPage> {
     info.thumbnail = videos.first().map(|v| v.thumbnail.clone());
     info.first_video_id = videos.first().map(|v| v.id.clone());
     Ok(PlaylistPage { info, description: None, videos, continuation: page.continuation })
+}
+
+/// Adds a video to one of the signed-in account's playlists.
+pub fn add_to_playlist(playlist_id: &str, video_id: &str) -> Result<()> {
+    let r = tv_call(
+        "browse/edit_playlist",
+        json!({ "playlistId": playlist_id, "actions": [{ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }] }),
+    )?;
+    if let Some(s) = r.get("status").and_then(Value::as_str).filter(|s| *s != "STATUS_SUCCEEDED") {
+        return Err(anyhow!("edit_playlist: {s}"));
+    }
+    Ok(())
+}
+
+/// Removes several videos from one of the signed-in account's playlists.
+pub fn remove_many_from_playlist(playlist_id: &str, video_ids: &[String]) -> Result<()> {
+    for chunk in video_ids.chunks(50) {
+        let actions: Vec<Value> = chunk.iter().map(|id| json!({ "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": id })).collect();
+        let r = tv_call("browse/edit_playlist", json!({ "playlistId": playlist_id, "actions": actions }))?;
+        if let Some(s) = r.get("status").and_then(Value::as_str).filter(|s| *s != "STATUS_SUCCEEDED") {
+            return Err(anyhow!("edit_playlist: {s}"));
+        }
+    }
+    Ok(())
 }
 
 /// Posts a message to a live stream's chat as the signed-in account.

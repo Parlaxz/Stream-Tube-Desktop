@@ -1,5 +1,6 @@
 //! Persistent storage: settings (JSON) + SQLite for subscriptions, history, playlists, caches.
 use crate::api::types::VideoItem;
+use crate::i18n::AppLanguage;
 use anyhow::Result;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -13,6 +14,7 @@ use std::sync::{Arc, OnceLock};
 pub struct Settings {
     // Appearance
     pub theme: String,
+    pub app_language: AppLanguage,
     pub accent: u32,
     /// ReVanced branding icon key for the window, taskbar and in-app logo ("" = accent logo).
     pub app_icon: String,
@@ -31,6 +33,7 @@ pub struct Settings {
     pub ytdlp_path: String,
     pub proxy: String,
     // Player
+    pub theater_mode: bool,
     pub default_quality: u32,
     /// Frame rate to prefer when a resolution offers both (0 = highest, else 60 or 30).
     pub preferred_fps: u32,
@@ -81,6 +84,7 @@ pub struct Settings {
     pub hide_related: bool,
     pub hide_watched_in_feed: bool,
     pub hide_view_counts: bool,
+    pub hide_subscriber_counts: bool,
     pub hide_description: bool,
     pub hide_channel_avatars: bool,
     pub hide_chapters: bool,
@@ -88,6 +92,8 @@ pub struct Settings {
     pub blocked_keywords: Vec<String>,
     /// (channel_id, name)
     pub blocked_channels: Vec<(String, String)>,
+    /// (video_id, title) hidden via "Not interested"
+    pub hidden_videos: Vec<(String, String)>,
     // Privacy
     pub history_enabled: bool,
     pub search_history_enabled: bool,
@@ -138,6 +144,11 @@ pub struct Settings {
     pub ambient_mode: bool,
     pub shorts_in_player: bool,
     pub shorts_autoadvance: bool,
+    pub shorts_preload: u8,
+    pub shorts_yt_layout: bool,
+    pub shorts_edge_nav: bool,
+    pub shorts_show_subscribe: bool,
+    pub shorts_show_dislike: bool,
     pub remember_quality: bool,
     pub exit_fullscreen_at_end: bool,
     /// "light" | "default" | "strong": gradient behind the player controls
@@ -148,8 +159,18 @@ pub struct Settings {
     pub hover_preview: bool,
     /// show archived annotations (notes and links YouTube removed in 2019)
     pub annotations: bool,
+    /// crop or zoom of the picture, a value of `player::aspect::MODES` ("original", "auto", "21:9"...)
+    pub aspect_mode: String,
     /// keep page scrollbars on screen instead of showing them on hover
     pub always_scrollbars: bool,
+    /// show the video title in the upper-left corner of the player when controls are visible
+    pub show_player_title: bool,
+    /// group subscriptions feed videos into day buckets (Today, Yesterday, ...)
+    pub feed_group_by_day: bool,
+    /// audio equalizer preset ("flat", "bass", "voice", "treble", "warm")
+    pub eq_preset: String,
+    /// keep the tab bar visible even when only one tab is open
+    pub always_show_tab_bar: bool,
 }
 
 impl Default for Settings {
@@ -165,6 +186,7 @@ impl Default for Settings {
         }
         Self {
             theme: "dark".into(),
+            app_language: AppLanguage::default(),
             accent: 0xff0033,
             app_icon: String::new(),
             start_page: "home".into(),
@@ -176,6 +198,7 @@ impl Default for Settings {
             display_server: "auto".into(),
             ytdlp_path: String::new(),
             proxy: String::new(),
+            theater_mode: false,
             default_quality: 1080,
             preferred_fps: 0,
             quality_variants: true,
@@ -207,6 +230,7 @@ impl Default for Settings {
             sb_notify: true,
             sb_skip_key: "enter".into(),
             annotations: true,
+            aspect_mode: "original".into(),
             always_scrollbars: false,
             dearrow_titles: false,
             dearrow_thumbnails: false,
@@ -218,12 +242,14 @@ impl Default for Settings {
             hide_related: false,
             hide_watched_in_feed: false,
             hide_view_counts: false,
+            hide_subscriber_counts: false,
             hide_description: false,
             hide_channel_avatars: false,
             hide_chapters: false,
             hide_explore: false,
             blocked_keywords: Vec::new(),
             blocked_channels: Vec::new(),
+            hidden_videos: Vec::new(),
             history_enabled: true,
             search_history_enabled: true,
             check_updates: true,
@@ -259,6 +285,15 @@ impl Default for Settings {
             ambient_mode: true,
             shorts_in_player: false,
             shorts_autoadvance: false,
+            feed_group_by_day: true,
+            show_player_title: false,
+            eq_preset: "flat".into(),
+            always_show_tab_bar: false,
+            shorts_preload: 1,
+            shorts_yt_layout: false,
+            shorts_edge_nav: true,
+            shorts_show_subscribe: true,
+            shorts_show_dislike: true,
             remember_quality: false,
             exit_fullscreen_at_end: true,
             controls_shade: "default".into(),
@@ -374,10 +409,6 @@ pub fn update_settings(f: impl FnOnce(&mut Settings)) {
     *settings_lock().write() = Arc::new(s);
 }
 
-pub fn ip_family() -> ureq::config::IpFamily {
-    if settings_snapshot().ipv4_only { ureq::config::IpFamily::Ipv4Only } else { ureq::config::IpFamily::Any }
-}
-
 /// Whether mpv can use this proxy itself (it only speaks HTTP proxies).
 pub fn mpv_http_proxy(p: &str) -> bool {
     let p = p.trim().to_ascii_lowercase();
@@ -389,6 +420,25 @@ pub fn proxy_setting() -> Option<String> {
     (!p.trim().is_empty()).then_some(p)
 }
 
+/// The profile holds the sign-in (OAuth tokens and Google cookies), so on Linux and
+/// macOS only its owner may open it: the folder is 0700 and the files already in it
+/// 0600. Windows keeps %APPDATA% per user already.
+#[cfg(unix)]
+fn make_private(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = std::fs::set_permissions(e.path(), std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn make_private(_dir: &std::path::Path) {}
+
 pub fn data_dir() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -396,6 +446,7 @@ pub fn data_dir() -> PathBuf {
         if let Some(d) = std::env::var_os("STREAMTUBE_DATA_DIR").filter(|d| !d.is_empty()) {
             let d = PathBuf::from(d);
             let _ = std::fs::create_dir_all(&d);
+            make_private(&d);
             return d;
         }
         // tests never touch the real profile
@@ -413,6 +464,7 @@ pub fn data_dir() -> PathBuf {
             let _ = std::fs::rename(&old, &d);
         }
         let _ = std::fs::create_dir_all(&d);
+        make_private(&d);
         // A -wal/-shm left without its database belongs to some other copy of it;
         // SQLite would replay it onto whatever database is put there next and
         // damage it, so drop it before anything opens the database.
@@ -534,7 +586,9 @@ fn db() -> &'static Mutex<Connection> {
     static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
     DB.get_or_init(|| {
         let conn = open_checked(&data_dir().join("streamtube.db"));
-        conn.execute_batch(&format!("PRAGMA journal_mode=WAL; {TABLES}"))
+        // WAL mode is crash-safe with synchronous=NORMAL and avoids an fsync
+        // on every 5-second playback progress save.
+        conn.execute_batch(&format!("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; {TABLES}"))
         .expect("init db");
         // built-in playlists
         let n: i64 = conn
@@ -723,6 +777,35 @@ pub fn history_progress(video_id: &str, progress: f64, duration: f64) {
         "UPDATE history SET progress=?2, duration=?3 WHERE video_id=?1",
         params![video_id, progress, duration],
     );
+}
+
+/// Like `history_progress`, on a background thread: the player saves progress every
+/// few seconds, and a slow disk must not stall the UI thread (it draws the video).
+/// Writes keep their order; with `wait`, this returns once the write (and every
+/// one queued before it) is done.
+pub fn history_progress_queued(video_id: &str, progress: f64, duration: f64, wait: bool) {
+    type Job = (String, f64, f64, Option<std::sync::mpsc::Sender<()>>);
+    static WORKER: OnceLock<Mutex<std::sync::mpsc::Sender<Job>>> = OnceLock::new();
+    let tx = WORKER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        let _ = std::thread::Builder::new().name("history-progress".into()).spawn(move || {
+            for (id, p, d, done) in rx {
+                history_progress(&id, p, d);
+                if let Some(done) = done {
+                    let _ = done.send(());
+                }
+            }
+        });
+        Mutex::new(tx)
+    });
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    if tx.lock().send((video_id.to_string(), progress, duration, wait.then_some(done_tx))).is_err() {
+        history_progress(video_id, progress, duration);
+        return;
+    }
+    if wait {
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    }
 }
 
 pub fn history_list(query: &str, limit: usize) -> Vec<HistoryEntry> {
@@ -1069,6 +1152,9 @@ pub fn is_filtered(v: &VideoItem, s: &Settings) -> bool {
     if s.hide_upcoming && v.is_upcoming {
         return true;
     }
+    if s.hidden_videos.iter().any(|(id, _)| id == &v.id) {
+        return true;
+    }
     if let Some(cid) = &v.channel_id {
         if s.blocked_channels.iter().any(|(id, _)| id == cid) {
             return true;
@@ -1095,6 +1181,16 @@ pub fn set_rating(video_id: &str, r: i8) {
 #[cfg(test)]
 mod settings_tests {
     use super::*;
+
+    #[test]
+    fn theater_mode_round_trips_and_defaults_to_off() {
+        let old = settings_from_value(serde_json::json!({}));
+        assert!(!old.theater_mode);
+
+        let enabled = Settings { theater_mode: true, ..old };
+        let saved = serde_json::to_value(enabled).unwrap();
+        assert!(settings_from_value(saved).theater_mode);
+    }
 
     #[test]
     fn a_bad_field_keeps_the_others() {
@@ -1144,5 +1240,28 @@ mod settings_tests {
         assert!(damaged, "the damaged file is kept");
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod progress_queue_tests {
+    use super::*;
+
+    #[test]
+    fn queued_progress_writes_land_in_order() {
+        let v = crate::api::types::VideoItem { id: "queued-progress".into(), ..Default::default() };
+        history_add(&v);
+        for i in 1..=50 {
+            history_progress_queued(&v.id, i as f64, 100.0, false);
+        }
+        history_progress_queued(&v.id, 77.0, 100.0, true);
+        // `wait` gives up after 5 s so shutdown can't hang; on a busy CI runner other
+        // tests can hold the database longer than that, so give the worker more time here
+        let read = || history_list("", 500).into_iter().find(|h| h.video.id == v.id).map(|h| h.progress);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while read() != Some(77.0) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(read(), Some(77.0));
     }
 }

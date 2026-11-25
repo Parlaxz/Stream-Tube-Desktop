@@ -670,9 +670,9 @@ fn apply_sync(cx: &mut App, s: &Sync, from_guest: bool) {
     }
     let pe = controller::player(cx);
     let loading = pe.read(cx).loading;
-    pe.update(cx, |p, _| {
+    pe.update(cx, |p, cx| {
         if p.paused != s.paused {
-            p.set_paused(s.paused);
+            p.set_paused(s.paused, cx);
         }
         if s.speed > 0.0 && (p.speed - s.speed).abs() > 0.001 {
             p.set_speed(s.speed);

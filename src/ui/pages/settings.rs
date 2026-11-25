@@ -1,4 +1,5 @@
 use crate::api::services::SB_CATEGORIES;
+use crate::i18n::{AppLanguage, t, tf};
 use crate::store::{self, Settings};
 use crate::ui::widgets::*;
 use crate::ui::*;
@@ -44,7 +45,7 @@ pub struct SettingsPage {
     /// Icon key staged in the App icon card; saved when Save is pressed.
     app_icon: String,
     scroll: ScrollHandle,
-    inputs: Vec<(&'static str, Entity<InputState>)>,
+    inputs: Vec<(&'static str, &'static str, Entity<InputState>)>,
     keyword: Entity<InputState>,
     ytdlp_version: Option<String>,
     /// whether FFmpeg was found (None until checked)
@@ -93,7 +94,7 @@ impl SettingsPage {
         let mut subs = Vec::new();
         for (key, val, ph, setter) in fields {
             let st = cx.new(|cx| {
-                let mut i = InputState::new(window, cx).placeholder(ph);
+                let mut i = InputState::new(window, cx).placeholder(t(ph));
                 i.set_value(val, window, cx);
                 i
             });
@@ -110,13 +111,13 @@ impl SettingsPage {
                         this.load_sb_stats(cx);
                     }
                     if matches!(ev, InputEvent::PressEnter { .. }) {
-                        toast(cx, "Saved");
+                        toast(cx, t("Saved"));
                     }
                 }
             }));
-            inputs.push((key, st));
+            inputs.push((key, ph, st));
         }
-        let keyword = cx.new(|cx| InputState::new(window, cx).placeholder("Add a keyword and press Enter"));
+        let keyword = cx.new(|cx| InputState::new(window, cx).placeholder(t("Add a keyword and press Enter")));
         subs.push(cx.subscribe_in(&keyword, window, |_, st, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = ev {
                 let v = st.read(cx).value().trim().to_string();
@@ -131,7 +132,7 @@ impl SettingsPage {
                 }
             }
         }));
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(t("Search settings")));
         subs.push(cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
                 cx.notify();
@@ -205,14 +206,19 @@ impl SettingsPage {
     }
 
     fn input(&self, key: &str) -> Entity<InputState> {
-        self.inputs.iter().find(|(k, _)| *k == key).map(|(_, e)| e.clone()).unwrap()
+        self.inputs.iter().find(|(k, _, _)| *k == key).map(|(_, _, e)| e.clone()).unwrap()
     }
 }
 
 /// Applies a changed setting to the running app (theme, palette, current playback).
-fn after_change(_id: &str, window: &mut Window, cx: &mut App) {
-    apply_theme(Some(window), cx);
-    crate::player::controller::apply_settings(cx);
+fn after_change(id: &str, window: &mut Window, cx: &mut App) {
+    if id == "app-language" {
+        crate::i18n::apply_component_locale();
+        window.set_window_title(&format!("{} - Stream Tube", t("Settings")));
+    } else {
+        apply_theme(Some(window), cx);
+        crate::player::controller::apply_settings(cx);
+    }
     crate::ui::app::refresh_all_pages(cx);
 }
 
@@ -253,7 +259,7 @@ fn caption_preview(s: &Settings) -> AnyElement {
         .text_size(px(s.caption_size as f32 * 0.45))
         .text_color(rgba(s.caption_color, s.caption_opacity))
         .when(s.caption_background, |d| d.bg(rgba(s.caption_bg_color, s.caption_bg_opacity)))
-        .child("Captions look like this");
+        .child(t("Captions look like this"));
     div()
         .w(px(320.))
         .h(px(90.))
@@ -276,12 +282,24 @@ fn rgb_to(c: u32) -> Hsla {
 }
 
 fn row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
+    row_text(t(title), t(desc), control, cx)
+}
+
+fn settings_search_text(text: &str) -> String {
+    text.replace(['İ', 'ı'], "i").to_lowercase()
+}
+
+fn matches_settings_search(labels: &[&str]) -> bool {
+    QUERY.with(|query| {
+        let query = query.borrow();
+        query.is_empty()
+            || labels.iter().any(|label| settings_search_text(label).contains(query.as_str()))
+    })
+}
+
+fn row_text(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
     let p = pal(cx);
-    let hidden = QUERY.with(|q| {
-        let q = q.borrow();
-        !q.is_empty() && !title.to_lowercase().contains(q.as_str()) && !desc.to_lowercase().contains(q.as_str())
-    });
-    if hidden {
+    if !matches_settings_search(&[title, desc]) {
         return div();
     }
     div()
@@ -314,12 +332,10 @@ fn row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
 /// A setting whose control is too wide to sit beside its text: the control goes
 /// underneath, across the full width of the card.
 fn stacked_row(title: &str, desc: &str, control: impl IntoElement, cx: &App) -> Div {
+    let title = t(title);
+    let desc = t(desc);
     let p = pal(cx);
-    let hidden = QUERY.with(|q| {
-        let q = q.borrow();
-        !q.is_empty() && !title.to_lowercase().contains(q.as_str()) && !desc.to_lowercase().contains(q.as_str())
-    });
-    if hidden {
+    if !matches_settings_search(&[title, desc]) {
         return div();
     }
     div()
@@ -377,7 +393,7 @@ fn segmented<T: PartialEq + Clone + 'static>(id: &'static str, options: &[(T, &s
                 .text_sm()
                 .when(active, |d| d.bg(p.accent).text_color(white()).font_weight(FontWeight::MEDIUM))
                 .when(!active, |d| d.text_color(p.text).hover(move |s| s.bg(p.hover)))
-                .child(label.to_string())
+                .child(t(label).to_string())
                 .on_click(move |_, window, cx| {
                     let v3 = v2.clone();
                     store::update_settings(|s| set(s, v3));
@@ -460,9 +476,26 @@ impl SettingsPage {
         if options.len() <= 3 {
             return segmented(id, options, cur, set, cx).into_any_element();
         }
-        let items: Vec<(String, String, bool, T)> = options.iter().map(|(v, l)| (l.to_string(), String::new(), *v == cur, v.clone())).collect();
+        let items: Vec<(String, String, bool, T)> = options.iter().map(|(v, l)| (t(l).to_string(), String::new(), *v == cur, v.clone())).collect();
         let label = items.iter().find(|i| i.2).map(|i| i.0.clone()).unwrap_or_default();
         self.select(id, label, 200., items, set, cx)
+    }
+
+    fn app_language(&self, current: AppLanguage, cx: &mut Context<Self>) -> AnyElement {
+        let mut label = String::new();
+        let items = AppLanguage::OPTIONS.iter().map(|&(language, name)| {
+            let selected = language == current;
+            if selected {
+                label = name.to_string();
+            }
+            let credit = match language {
+                AppLanguage::Azerbaijani => "POMI (MrPOMIDOR4EK)",
+                AppLanguage::Russian => "Kushida",
+                _ => "",
+            };
+            (name.to_string(), credit.to_string(), selected, language)
+        }).collect();
+        self.select("app-language", label, 280., items, set_app_language, cx)
     }
 
     /// A dropdown button: `items` are (label, detail, active, value).
@@ -558,8 +591,8 @@ impl SettingsPage {
 
     /// A dropdown listing `list` (code, name); picks are written with `set`.
     fn dropdown(&self, id: &'static str, list: &'static [(&'static str, &'static str)], cur: String, set: fn(&mut Settings, String), cx: &mut Context<Self>) -> AnyElement {
-        let label = format!("{}  ·  {}", crate::locale::name(list, &cur), cur);
-        let items = list.iter().map(|(code, name)| (name.to_string(), code.to_string(), code.eq_ignore_ascii_case(&cur), code.to_string())).collect();
+        let label = format!("{} ({cur})", t(crate::locale::name(list, &cur)));
+        let items = list.iter().map(|(code, name)| (t(name).to_string(), code.to_string(), code.eq_ignore_ascii_case(&cur), code.to_string())).collect();
         self.select(id, label, 280., items, set, cx)
     }
 
@@ -768,7 +801,7 @@ impl SettingsPage {
                     div()
                         .text_sm()
                         .text_color(p.text)
-                        .child("These are built into Stream Tube, so they work without YouTube Premium and without signing in."),
+                        .child(t("These are built into Stream Tube, so they work without YouTube Premium and without signing in.")),
                 )
         });
         card(cx)
@@ -791,13 +824,25 @@ impl SettingsPage {
         let s = store::settings_snapshot();
         card(cx)
             .child(row("Shorts: play next automatically", "Move to the next Short when one ends", switch("sha", s.shorts_autoadvance, |s, v| s.shorts_autoadvance = v, cx), cx))
+            .child(row(
+                "Preload upcoming Shorts",
+                "Buffer the start of this many videos ahead of playback",
+                self.choice(
+                    "shorts-preload",
+                    &[(0, "Off"), (1, "1"), (2, "2"), (3, "3"), (4, "4"), (5, "5")],
+                    s.shorts_preload.min(crate::player::shorts_preload::MAX_AHEAD),
+                    |s, v| s.shorts_preload = v,
+                    cx,
+                ),
+                cx,
+            ))
             .child(row("Open Shorts in the regular player", "", switch("shp", s.shorts_in_player, |s, v| s.shorts_in_player = v, cx), cx))
             .child(row("Double-click for fullscreen", "", switch("dcf", s.double_click_fullscreen, |s, v| s.double_click_fullscreen = v, cx), cx))
             .child(row("Exit fullscreen when a video ends", "", switch("efe", s.exit_fullscreen_at_end, |s, v| s.exit_fullscreen_at_end = v, cx), cx))
             .child(row(
                 "Controls shade",
                 "Gradient behind the player controls",
-                self.choice("shade", &[("light".to_string(), "Light"), ("default".to_string(), "Default"), ("strong".to_string(), "Strong")], s.controls_shade.clone(), |s, v| s.controls_shade = v, cx),
+                self.choice("shade", &[("light".to_string(), "Subtle"), ("default".to_string(), "Default"), ("strong".to_string(), "Strong")], s.controls_shade.clone(), |s, v| s.controls_shade = v, cx),
                 cx,
             ))
     }
@@ -810,22 +855,28 @@ impl SettingsPage {
         } else {
             pill("acct-in", Some("circle-user"), "Sign in", cx).on_click(|_, window, cx| crate::ui::app::open_sign_in(window, cx))
         };
-        let account_desc = account.map(|a| a.name).unwrap_or_else(|| "Personal recommendations, subscriptions, likes and history".into());
+        let account_desc = account.map(|a| a.name).unwrap_or_else(|| t("Personal recommendations, subscriptions, likes and history").into());
         card(cx)
-            .child(row("YouTube account", &account_desc, account_ctl, cx))
+            .child(row_text(t("YouTube account"), &account_desc, account_ctl, cx))
             .child({
                 let (desc, ctl) = match crate::api::web::account_name().filter(|_| crate::api::web::connected()) {
                     Some(name) => (
-                        format!("Connected as {name}. Videos you watch here show in your YouTube history and resume where you stopped on your other devices"),
+                        tf!("Connected as {0}. Videos you watch here show in your YouTube history and resume where you stopped on your other devices", name),
                         pill("web-out", Some("unlink"), "Disconnect", cx).on_click(|_, _, cx| crate::ui::app::disconnect_web(cx)),
                     ),
                     None => (
-                        "Sign in through your browser so videos you watch here show in your YouTube history and resume on your phone".to_string(),
+                        "Sign in through your browser so videos you watch here show in your YouTube history and resume on your phone. It also plays age-restricted videos and ones YouTube shows a bot check for".to_string(),
                         pill("web-in", Some("history"), "Connect", cx).on_click(|_, _, cx| crate::ui::app::open_web_sign_in(cx)),
                     ),
                 };
                 row("YouTube watch history", &desc, ctl, cx)
             })
+            .child(row(
+                "App language",
+                "",
+                self.app_language(s.app_language, cx),
+                cx,
+            ))
             .child(row("Theme", "", self.choice("theme", &[("dark".to_string(), "Dark"), ("light".to_string(), "Light"), ("system".to_string(), "System")], s.theme.clone(), |s, v| s.theme = v, cx), cx))
             .child(row("Accent color", "Switches, highlights, progress and the seek bar", accent_swatches(s.accent, cx), cx))
             .child(row("Start page", "", self.choice("start", &[("home".to_string(), "Home"), ("subscriptions".to_string(), "Subscriptions"), ("history".to_string(), "History")], s.start_page.clone(), |s, v| s.start_page = v, cx), cx))
@@ -836,12 +887,18 @@ impl SettingsPage {
                 switch("sbar", s.always_scrollbars, |s, v| s.always_scrollbars = v, cx),
                 cx,
             ))
+            .child(row(
+                "Always show tab bar",
+                "Keep the tab bar visible even when only one tab is open",
+                switch("tbar", s.always_show_tab_bar, |s, v| s.always_show_tab_bar = v, cx),
+                cx,
+            ))
             .child(row("Density", "", self.choice("density", &[("compact".to_string(), "Compact"), ("default".to_string(), "Default"), ("comfortable".to_string(), "Comfortable")], s.density.clone(), |s, v| s.density = v, cx), cx))
             .child(row("Thumbnail corners", "", self.choice("radius", &[(0.0f32, "Square"), (6.0, "Small"), (12.0, "Rounded"), (18.0, "Large")], s.thumb_radius, |s, v| s.thumb_radius = v, cx), cx))
             .child(row("Grid columns", "", self.choice("cols", &[(0u32, "Auto"), (3, "3"), (4, "4"), (5, "5"), (6, "6")], s.grid_columns, |s, v| s.grid_columns = v, cx), cx))
             .child(row("Play videos on hover", "Muted preview when the pointer rests on a thumbnail", switch("hovp", s.hover_preview, |s, v| s.hover_preview = v, cx), cx))
             .child(row("Region", "Trending, Explore and search results", self.dropdown("dd-region", crate::locale::REGIONS, s.region.clone(), |s, v| s.region = v, cx), cx))
-            .child(row("Language", "Titles, dates and YouTube's text", self.dropdown("dd-lang", crate::locale::LANGUAGES, s.language.clone(), |s, v| s.language = v, cx), cx))
+            .child(row("YouTube language", "Titles, dates and YouTube's text", self.dropdown("dd-lang", crate::locale::LANGUAGES, s.language.clone(), |s, v| s.language = v, cx), cx))
     }
 
     fn player(&self, cx: &mut Context<Self>) -> Div {
@@ -856,7 +913,7 @@ impl SettingsPage {
             .child(row("Audio only mode", "", switch("ao", s.audio_only, |s, v| s.audio_only = v, cx), cx))
             .child(row("Hardware decoding", "Takes effect after restart", switch("hw", s.hwdec, |s, v| s.hwdec = v, cx), cx))
             .child(row("Captions on by default", "", switch("cc", s.captions_enabled, |s, v| s.captions_enabled = v, cx), cx))
-            .child(row("Caption language", "Preferred subtitle track", self.dropdown("dd-cap", crate::locale::LANGUAGES, s.captions_lang.clone(), |s, v| s.captions_lang = v, cx), cx))
+            .child(row("Caption language", "Preferred subtitle track", self.dropdown("dd-cap", crate::locale::CAPTION_LANGUAGES, s.captions_lang.clone(), |s, v| s.captions_lang = v, cx), cx))
             .child(row("Caption size", "", self.choice("capsize", &[(30u32, "Small"), (40, "Medium"), (52, "Large"), (64, "Extra large")], s.caption_size, |s, v| s.caption_size = v, cx), cx))
             .child(row(
                 "Caption font",
@@ -892,7 +949,7 @@ impl SettingsPage {
             .child(row(
                 "External player",
                 &match crate::downloads::detect_player() {
-                    Some((name, _)) => format!("Leave empty to use {name}, which is installed. Or enter the path to another player"),
+                    Some((name, _)) => tf!("Leave empty to use {0}, which is installed. Or enter the path to another player", name),
                     None => "Leave empty to use VLC or mpv when installed, or your default player. Or enter the path to another player".to_string(),
                 },
                 text_field(&self.input("external"), 320., cx),
@@ -964,14 +1021,14 @@ impl SettingsPage {
                         let id = s.sb_user_id.clone();
                         d.child(pill("sbid-copy", Some("copy"), "Copy", cx).flex_none().on_click(move |_, _, cx| {
                             copy_to_clipboard(id.clone(), cx);
-                            toast(cx, "Private ID copied");
+                            toast(cx, t("Private ID copied"));
                         }))
                     })
                     .child(pill("sbid-gen", Some("key-round"), "Generate", cx).flex_none().on_click(cx.listener(|this, _, window, cx| {
                         let id = crate::api::services::new_sb_user_id();
                         store::update_settings(|s| s.sb_user_id = id.clone());
                         this.input("sb_user_id").update(cx, |i, cx| i.set_value(id, window, cx));
-                        toast(cx, "New SponsorBlock ID created");
+                        toast(cx, t("New SponsorBlock ID created"));
                         this.load_sb_stats(cx);
                         after_change("sbid", window, cx);
                     }))),
@@ -984,8 +1041,8 @@ impl SettingsPage {
                 .filter(|(v, _)| !(*cat == "poi_highlight" && (*v == "skip" || *v == "ask")))
                 .map(|(v, l)| (v.to_string(), l))
                 .collect();
-            let items = opts.iter().map(|(v, l)| (l.to_string(), String::new(), *v == cur, (cat.to_string(), v.clone()))).collect();
-            let label = opts.iter().find(|(v, _)| *v == cur).map(|(_, l)| l.to_string()).unwrap_or_default();
+            let items = opts.iter().map(|(v, l)| (t(l).to_string(), String::new(), *v == cur, (cat.to_string(), v.clone()))).collect();
+            let label = opts.iter().find(|(v, _)| *v == cur).map(|(_, l)| t(l).to_string()).unwrap_or_default();
             let id: &'static str = Box::leak(format!("sbcat-{cat}").into_boxed_str());
             let ctl = self.select(id, label, 180., items, |s, (c, v): (String, String)| {
                 s.sb_actions.insert(c, v);
@@ -1013,11 +1070,7 @@ impl SettingsPage {
     fn sb_stats_card(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
         let s = store::settings_snapshot();
-        let hidden = QUERY.with(|q| {
-            let q = q.borrow();
-            !q.is_empty() && !"sponsorblock stats contributions segments saved".contains(q.as_str())
-        });
-        if s.sb_user_id.trim().is_empty() || hidden {
+        if s.sb_user_id.trim().is_empty() || !matches_settings_search(&[t("sponsorblock stats contributions segments saved")]) {
             return div().into_any_element();
         }
         let stat = |value: String, label: &str| {
@@ -1030,16 +1083,16 @@ impl SettingsPage {
                 .rounded_lg()
                 .bg(p.bg)
                 .child(div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child(value))
-                .child(div().text_xs().text_color(p.text2).child(label.to_string()))
+                .child(div().text_xs().text_color(p.text2).child(t(label).to_string()))
         };
         let body = match &self.sb_stats {
-            None => div().py_3().text_sm().text_color(p.text2).child("Loading your stats…").into_any_element(),
+            None => div().py_3().text_sm().text_color(p.text2).child(t("Loading your stats…")).into_any_element(),
             Some(Err(e)) => div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .py_3()
-                .child(div().text_sm().text_color(p.text2).child(format!("Couldn't load stats: {e}")))
+                .child(div().text_sm().text_color(p.text2).child(tf!("Couldn't load stats: {0}", e)))
                 .child(pill("sb-retry", Some("refresh-cw"), "Retry", cx).on_click(cx.listener(|this, _, _, cx| this.load_sb_stats(cx))))
                 .into_any_element(),
             Some(Ok(u)) => {
@@ -1057,7 +1110,7 @@ impl SettingsPage {
                             .text_sm()
                             .text_color(p.text)
                             .child(icon("shield-check").size_4().text_color(p.accent))
-                            .child(if u.user_name.is_empty() { "Your contributions".to_string() } else { format!("{} · your contributions", u.user_name) })
+                            .child(if u.user_name.is_empty() { t("Your contributions").to_string() } else { tf!("{0}, your contributions", u.user_name) })
                             .when(u.vip, |d| d.child(div().px_2().rounded_full().bg(p.accent).text_xs().text_color(white()).child("VIP"))),
                     )
                     .child(
@@ -1069,8 +1122,8 @@ impl SettingsPage {
                             .child(stat(crate::api::services::format_saved_minutes(u.minutes_saved), "of people's time saved"))
                             .child(stat(format!("{:.1}", u.reputation), "reputation")),
                     )
-                    .when(u.segments == 0, |d| d.child(div().text_xs().text_color(p.text2).child("No submissions yet for this ID. Segments you submit will count here.")))
-                    .when(u.warnings > 0, |d| d.child(div().text_xs().text_color(p.text2).child(format!("{} active warning(s) on this account", u.warnings))))
+                    .when(u.segments == 0, |d| d.child(div().text_xs().text_color(p.text2).child(t("No submissions yet for this ID. Segments you submit will count here."))))
+                    .when(u.warnings > 0, |d| d.child(div().text_xs().text_color(p.text2).child(tf!("{0} active warning(s) on this account", u.warnings))))
                     .into_any_element()
             }
         };
@@ -1081,7 +1134,7 @@ impl SettingsPage {
                     .items_center()
                     .justify_between()
                     .pt_2()
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Your SponsorBlock stats"))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t("Your SponsorBlock stats")))
                     .child(icon_button("sb-refresh", "refresh-cw", cx).on_click(cx.listener(|this, _, _, cx| this.load_sb_stats(cx)))),
             )
             .child(body)
@@ -1132,6 +1185,24 @@ impl SettingsPage {
                     })),
             );
         }
+        let mut hidden = div().flex().flex_col();
+        for (id, title) in s.hidden_videos.iter() {
+            let id2 = id.clone();
+            hidden = hidden.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .py_1()
+                    .child(div().min_w_0().flex_1().truncate().text_sm().child(title.clone()))
+                    .child(pill(SharedString::from(format!("unh-{id}")), None, "Unhide", cx).on_click(move |_, _, cx| {
+                        let i = id2.clone();
+                        store::update_settings(|s| s.hidden_videos.retain(|(v, _)| *v != i));
+                        cx.refresh_windows();
+                    })),
+            );
+        }
         div()
             .flex()
             .flex_col()
@@ -1145,6 +1216,7 @@ impl SettingsPage {
                     .child(row("Hide related videos", "", switch("hr", s.hide_related, |s, v| s.hide_related = v, cx), cx))
                     .child(row("Hide description", "", switch("hd", s.hide_description, |s, v| s.hide_description = v, cx), cx))
                     .child(row("Hide view counts", "", switch("hv", s.hide_view_counts, |s, v| s.hide_view_counts = v, cx), cx))
+                    .child(row("Hide subscriber counts", "", switch("hsc", s.hide_subscriber_counts, |s, v| s.hide_subscriber_counts = v, cx), cx))
                     .child(row("Hide channel avatars", "", switch("ha", s.hide_channel_avatars, |s, v| s.hide_channel_avatars = v, cx), cx))
                     .child(row("Hide chapters", "", switch("hch", s.hide_chapters, |s, v| s.hide_chapters = v, cx), cx))
                     .child(row("Hide Explore / trending", "", switch("he", s.hide_explore, |s, v| s.hide_explore = v, cx), cx))
@@ -1158,7 +1230,12 @@ impl SettingsPage {
             .child(
                 card(cx)
                     .child(row("Blocked channels", "", div(), cx))
-                    .child(div().py_2().child(if s.blocked_channels.is_empty() { div().text_xs().text_color(p.text2).child("None").into_any_element() } else { chans.into_any_element() })),
+                    .child(div().py_2().child(if s.blocked_channels.is_empty() { div().text_xs().text_color(p.text2).child(t("None")).into_any_element() } else { chans.into_any_element() })),
+            )
+            .child(
+                card(cx)
+                    .child(row("Hidden videos", "", div(), cx))
+                    .child(div().py_2().child(if s.hidden_videos.is_empty() { div().text_xs().text_color(p.text2).child(t("None")).into_any_element() } else { hidden.into_any_element() })),
             )
     }
 
@@ -1173,6 +1250,7 @@ impl SettingsPage {
             ))
             .child(row("Include Shorts in feed", "Extra request per channel", switch("fis", s.feed_include_shorts, |s, v| s.feed_include_shorts = v, cx), cx))
             .child(row("Include live streams in feed", "", switch("fil", s.feed_include_live, |s, v| s.feed_include_live = v, cx), cx))
+            .child(row("Group videos by day", "", switch("fgd", s.feed_group_by_day, |s, v| s.feed_group_by_day = v, cx), cx))
     }
 
     fn privacy(&self, cx: &mut Context<Self>) -> Div {
@@ -1182,12 +1260,12 @@ impl SettingsPage {
             .child(row("Save search history", "", switch("se", s.search_history_enabled, |s, v| s.search_history_enabled = v, cx), cx))
             .child(row("Clear search history", "", pill("csh", Some("trash-2"), "Clear", cx).on_click(|_, _, cx| {
                 store::search_history_clear();
-                toast(cx, "Search history cleared");
+                toast(cx, t("Search history cleared"));
             }), cx))
             .child(row("Clear watch history", "", pill("cwh", Some("trash-2"), "Clear", cx).on_click(|_, _, cx| {
                 store::history_clear();
                 cx.default_global::<crate::ui::cards::Watched>().0.clear();
-                toast(cx, "Watch history cleared");
+                toast(cx, t("Watch history cleared"));
             }), cx))
     }
 
@@ -1231,13 +1309,13 @@ impl SettingsPage {
             .child(row(
                 "yt-dlp path",
                 &match &self.ytdlp_version {
-                    Some(v) => format!("Detected yt-dlp {v}"),
+                    Some(v) => tf!("Detected yt-dlp {0}", v),
                     None => "yt-dlp not found — install it for downloads in all qualities and the fallback extractor".into(),
                 },
                 text_field(&self.input("ytdlp"), 320., cx),
                 cx,
             ))
-            .child(row("Use IPv4 only", "Avoids YouTube's “confirm you're not a bot” check on flagged IPv6 networks", switch("ipv4", s.ipv4_only, |s, v| s.ipv4_only = v, cx), cx))
+            .child(row("Use IPv4 only", "Force IPv4 for new requests. Turn this off if YouTube flags your IPv4 connection.", switch("ipv4", s.ipv4_only, |s, v| s.ipv4_only = v, cx), cx))
             .child(row("Proxy", "Restart required", text_field(&self.input("proxy"), 320., cx), cx))
             .child(row("Update yt-dlp", "", pill("ytu", Some("refresh-cw"), "Update", cx).on_click(|_, _, cx| {
                 cx.spawn(async move |cx| {
@@ -1269,7 +1347,7 @@ impl SettingsPage {
             .child(row(
                 "yt-dlp",
                 &match &self.ytdlp_version {
-                    Some(v) => format!("Installed ({v}). Downloads in every quality, with SponsorBlock chapters"),
+                    Some(v) => tf!("Installed ({0}). Downloads in every quality, with SponsorBlock chapters", v),
                     None => "Needed for downloads above 360p. Stream Tube can fetch it for you".into(),
                 },
                 if let Some(f) = crate::downloads::ytdlp_fetch() {
@@ -1277,7 +1355,7 @@ impl SettingsPage {
                 } else if self.ytdlp_version.is_some() {
                     div().into_any_element()
                 } else {
-                    pill("get-ytdlp", Some("download"), &format!("Get yt-dlp ({})", crate::downloads::YTDLP_SIZE), cx)
+                    pill("get-ytdlp", Some("download"), &tf!("Get yt-dlp ({0})", crate::downloads::YTDLP_SIZE), cx)
                         .on_click(|_, _, cx| crate::downloads::fetch_ytdlp(cx))
                         .into_any_element()
                 },
@@ -1293,7 +1371,7 @@ impl SettingsPage {
                 if let Some(f) = crate::downloads::ffmpeg_fetch() {
                     fetch_progress("ffmpeg-prog", f, cx)
                 } else if self.ffmpeg_found == Some(false) {
-                    pill("get-ffmpeg", Some("download"), &format!("Get FFmpeg ({})", crate::downloads::FFMPEG_SIZE), cx)
+                    pill("get-ffmpeg", Some("download"), &tf!("Get FFmpeg ({0})", crate::downloads::FFMPEG_SIZE), cx)
                         .on_click(|_, _, cx| crate::downloads::fetch_ffmpeg(cx))
                         .into_any_element()
                 } else {
@@ -1312,7 +1390,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap_6()
-            .child(div().text_sm().text_color(p.text2).child(format!("{n_subs} subscriptions • {n_hist} history entries • {n_pl} playlists • stored in {}", store::data_dir().display())))
+            .child(div().text_sm().text_color(p.text2).child(tf!("{0} subscriptions, {1} history entries, {2} playlists, stored in {3}", n_subs, n_hist, n_pl, store::data_dir().display())))
             .child(
                 card(cx)
                     .child(row(
@@ -1327,7 +1405,7 @@ impl SettingsPage {
                                         let _ = cx.update(|cx| {
                                             match res {
                                                 Ok(r) => toast(cx, r.to_string()),
-                                                Err(e) => toast(cx, format!("Import failed: {e}")),
+                                                Err(e) => toast(cx, tf!("Import failed: {0}", e)),
                                             }
                                             cx.set_global(crate::ui::cards::Watched(store::progress_map()));
                                             cx.refresh_windows();
@@ -1350,19 +1428,19 @@ impl SettingsPage {
         let s = store::settings_snapshot();
         let mpv = crate::player::mpv::available();
         card(cx)
-            .child(row("Stream Tube", &format!("Version {}", env!("CARGO_PKG_VERSION")), div(), cx))
+            .child(row("Stream Tube", &tf!("Version {0}", env!("CARGO_PKG_VERSION")), div(), cx))
             .child(row("Video engine", if mpv { "libmpv" } else if cfg!(windows) { "libmpv-2.dll not found" } else { "libmpv not found (install the libmpv package)" }, div(), cx))
             .child(row("yt-dlp", self.ytdlp_version.as_deref().unwrap_or("not installed"), div(), cx))
             .child({
                 use crate::updater::Status;
                 let status = cx.default_global::<crate::updater::Updates>().status.clone();
                 let text = match &status {
-                    Status::Idle => "Pre-releases included".to_string(),
-                    Status::Checking => "Checking…".to_string(),
-                    Status::UpToDate => "You have the latest version".to_string(),
-                    Status::Available(r) => format!("{} is available", r.name),
-                    Status::Downloading(_, f) => format!("Downloading… {:.0}%", f * 100.0),
-                    Status::Error(e) => format!("Could not check: {e}"),
+                    Status::Idle => t("Pre-releases included").to_string(),
+                    Status::Checking => t("Checking…").to_string(),
+                    Status::UpToDate => t("You have the latest version").to_string(),
+                    Status::Available(r) => tf!("{0} is available", r.name),
+                    Status::Downloading(_, f) => tf!("Downloading… {0}%", format_args!("{:.0}", f * 100.0)),
+                    Status::Error(e) => tf!("Could not check: {0}", e),
                 };
                 let btn = match &status {
                     Status::Available(_) => pill("upd-show", Some("download"), "Update", cx).on_click(|_, window, cx| crate::ui::app::open_dialog(crate::ui::app::Dialog::Update, window, cx)),
@@ -1397,8 +1475,8 @@ fn export_button(id: &'static str, name: &'static str, kind: ExportKind, cx: &Ap
                 })
                 .await;
                 let _ = cx.update(|cx| match res {
-                    Ok(_) => toast(cx, format!("Exported to {}", path.display())),
-                    Err(e) => toast(cx, format!("Export failed: {e}")),
+                    Ok(_) => toast(cx, tf!("Exported to {0}", path.display())),
+                    Err(e) => toast(cx, tf!("Export failed: {0}", e)),
                 });
             }
         })
@@ -1407,7 +1485,12 @@ fn export_button(id: &'static str, name: &'static str, kind: ExportKind, cx: &Ap
 }
 
 impl Render for SettingsPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        localize_placeholder(&self.search, "Search settings", window, cx);
+        localize_placeholder(&self.keyword, "Add a keyword and press Enter", window, cx);
+        for (_, source, input) in &self.inputs {
+            localize_placeholder(input, source, window, cx);
+        }
         let tools_gen = crate::downloads::tools_generation();
         if tools_gen != self.tools_gen {
             // a tool finished downloading: show it as installed without a reload
@@ -1415,7 +1498,7 @@ impl Render for SettingsPage {
             self.check_tools(cx);
         }
         let p = pal(cx);
-        let query = self.search.read(cx).value().trim().to_lowercase();
+        let query = settings_search_text(self.search.read(cx).value().trim());
         QUERY.with(|q| *q.borrow_mut() = query.clone());
         let mut nav = div().flex().flex_col().gap_1().w(px(240.)).flex_none().child(
             div()
@@ -1450,7 +1533,7 @@ impl Render for SettingsPage {
                     .when(active, |d| d.bg(p.chip).font_weight(FontWeight::SEMIBOLD))
                     .hover(move |s| s.bg(p.hover))
                     .child(icon(ic).size_5().text_color(if active { p.accent } else { p.text }))
-                    .child(name.to_string())
+                    .child(t(name).to_string())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.section = sec;
                         cx.notify();
@@ -1477,12 +1560,12 @@ impl Render for SettingsPage {
             // search: matching rows from every section
             let mut all = div().flex().flex_col().gap_4();
             for (sec, name, _) in SECTIONS {
-                all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(name.to_uppercase())).child(render_section(self, *sec, cx));
+                all = all.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(t(name).to_uppercase())).child(render_section(self, *sec, cx));
             }
             QUERY.with(|q| q.borrow_mut().clear());
             return page_scroll("settings-scroll", &self.scroll).child(
                 div().flex().justify_center().gap_8().px_6().pt_6().pb_24().child(nav).child(
-                    div().flex().flex_col().gap_4().flex_1().max_w(px(860.)).min_w_0().child(section_title(&format!("Results for “{query}”"), cx).text_2xl()).child(all),
+                    div().flex().flex_col().gap_4().flex_1().max_w(px(860.)).min_w_0().child(section_title(tf!("Results for “{0}”", query), cx).text_2xl()).child(all),
                 ),
             );
         }
@@ -1502,7 +1585,7 @@ impl Render for SettingsPage {
             Section::Data => self.data(cx),
             Section::About => self.about(cx),
         };
-        let title = SECTIONS.iter().find(|s| s.0 == self.section).map(|s| s.1).unwrap_or("");
+        let title = SECTIONS.iter().find(|s| s.0 == self.section).map(|s| t(s.1)).unwrap_or("");
         page_scroll("settings-scroll", &self.scroll).child(
             div().flex().justify_center().gap_8().px_6().pt_6().pb_24().child(nav).child(
                 div()
@@ -1522,8 +1605,8 @@ impl Render for SettingsPage {
 fn fetch_progress(id: &'static str, f: crate::downloads::ToolFetch, cx: &App) -> AnyElement {
     let p = pal(cx);
     let (label, frac) = match f {
-        crate::downloads::ToolFetch::Downloading(n) => (format!("Downloading… {n}%"), n as f32 / 100.0),
-        crate::downloads::ToolFetch::Unpacking => ("Unpacking…".to_string(), 1.0),
+        crate::downloads::ToolFetch::Downloading(n) => (tf!("Downloading… {0}%", n), n as f32 / 100.0),
+        crate::downloads::ToolFetch::Unpacking => (t("Unpacking…").to_string(), 1.0),
     };
     div()
         .id(id)
@@ -1534,4 +1617,46 @@ fn fetch_progress(id: &'static str, f: crate::downloads::ToolFetch, cx: &App) ->
         .child(div().text_sm().text_color(p.text2).child(label))
         .child(div().h(px(4.)).w_full().rounded_full().bg(p.hover).child(div().h_full().w(relative(frac)).rounded_full().bg(p.accent)))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::settings_search_text;
+
+    #[test]
+    fn settings_search_accepts_dotted_and_dotless_i() {
+        assert_eq!(settings_search_text("İzleme"), "izleme");
+        assert_eq!(settings_search_text("AYARI"), settings_search_text("ayarı"));
+    }
+}
+
+/// Changes the app language. The YouTube and caption languages follow it while
+/// they still match the previous app language, so a separate choice is kept (#122).
+fn set_app_language(s: &mut Settings, language: AppLanguage) {
+    let old = s.app_language.code();
+    if s.language.eq_ignore_ascii_case(old) {
+        s.language = language.code().to_string();
+    }
+    if s.captions_lang.eq_ignore_ascii_case(old) {
+        s.captions_lang = language.code().to_string();
+    }
+    s.app_language = language;
+}
+
+#[cfg(test)]
+mod app_language_tests {
+    use super::{AppLanguage, Settings, set_app_language};
+
+    #[test]
+    fn youtube_and_caption_languages_follow_unless_chosen_separately() {
+        let mut s = Settings::default();
+        set_app_language(&mut s, AppLanguage::Russian);
+        assert_eq!((s.language.as_str(), s.captions_lang.as_str()), ("ru", "ru"));
+
+        // captions set to something else on purpose stay as they are
+        s.captions_lang = "ja".into();
+        set_app_language(&mut s, AppLanguage::German);
+        assert_eq!((s.language.as_str(), s.captions_lang.as_str()), ("de", "ja"));
+        assert_eq!(s.app_language, AppLanguage::German);
+    }
 }

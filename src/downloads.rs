@@ -1,6 +1,9 @@
 //! Download manager (yt-dlp when available, native fallback) and external player launching.
+pub(crate) mod transcript;
+
 use crate::api::streams::{self, hide_window};
-use crate::api::types::VideoItem;
+use crate::i18n::{t as translate, tf};
+use crate::api::types::{CaptionTrack, VideoItem};
 use crate::store;
 use crate::ui::toast;
 use gpui_kit::*;
@@ -39,6 +42,8 @@ pub struct Downloads {
 
 impl Global for Downloads {}
 
+pub const TRANSCRIPTS: &[(&str, &str)] = &[("txt", "Transcript (.txt)"), ("srt", "Subtitles (.srt)")];
+
 pub const FORMATS: &[(&str, &str)] = &[
     ("1080", "1080p (recommended)"),
     ("best", "Best available (up to 4K, large files)"),
@@ -53,7 +58,7 @@ pub fn start_many(videos: Vec<VideoItem>, cx: &mut App) {
         return;
     }
     if !store::settings_snapshot().download_dir_chosen {
-        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Save downloads here".into()) });
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(translate("Save downloads here").into()) });
         cx.spawn(async move |cx| {
             let picked = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|p| p.into_iter().next());
             let _ = cx.update(|cx| match picked {
@@ -64,7 +69,7 @@ pub fn start_many(videos: Vec<VideoItem>, cx: &mut App) {
                     });
                     start_many(videos, cx);
                 }
-                None => toast(cx, "Download cancelled"),
+                None => toast(cx, translate("Download cancelled")),
             });
         })
         .detach();
@@ -75,18 +80,22 @@ pub fn start_many(videos: Vec<VideoItem>, cx: &mut App) {
         start(v, None, cx);
     }
     if n > 1 {
-        toast(cx, format!("Downloading {n} videos"));
+        toast(cx, tf!("Downloading {0} videos", n));
     }
 }
 
 pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
+    start_with_track(video, format, None, cx);
+}
+
+pub(crate) fn start_with_track(video: VideoItem, format: Option<String>, track: Option<CaptionTrack>, cx: &mut App) {
     // First download: ask where to save (once), like a browser does.
     if !store::settings_snapshot().download_dir_chosen {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Save downloads here".into()),
+            prompt: Some(translate("Save downloads here").into()),
         });
         cx.spawn(async move |cx| {
             let picked = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|p| p.into_iter().next());
@@ -96,9 +105,9 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
                         s.download_dir = dir.to_string_lossy().into_owned();
                         s.download_dir_chosen = true;
                     });
-                    start(video, format, cx);
+                    start_with_track(video, format, track, cx);
                 }
-                None => toast(cx, "Download cancelled"),
+                None => toast(cx, translate("Download cancelled")),
             });
         })
         .detach();
@@ -106,7 +115,8 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
     }
     let fmt = format.unwrap_or_else(|| store::settings_snapshot().download_format.clone());
     // without yt-dlp only 360p (one combined stream) or audio can be saved
-    if fmt != "audio" && fmt != "single" && streams::ytdlp_path().is_none() {
+    let transcript = TRANSCRIPTS.iter().any(|(format, _)| *format == fmt);
+    if !transcript && fmt != "audio" && fmt != "single" && streams::ytdlp_path().is_none() {
         if YTDLP_FETCHING.load(Ordering::SeqCst) {
             PENDING.lock().push((video, Some(fmt)));
             return;
@@ -114,22 +124,22 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
         let v2 = video.clone();
         crate::ui::toast_with_actions(
             cx,
-            "Higher quality downloads use yt-dlp",
+            translate("Higher quality downloads use yt-dlp"),
             vec![
                 (
-                    format!("Get yt-dlp ({YTDLP_SIZE})").into(),
+                    tf!("Get yt-dlp ({0})", YTDLP_SIZE).into(),
                     Arc::new(move |_, cx: &mut App| {
                         PENDING.lock().push((video.clone(), Some(fmt.clone())));
                         fetch_ytdlp(cx);
                     }),
                 ),
-                ("Download 360p".into(), Arc::new(move |_, cx: &mut App| start(v2.clone(), Some("single".into()), cx))),
+                (translate("Download 360p").into(), Arc::new(move |_, cx: &mut App| start(v2.clone(), Some("single".into()), cx))),
             ],
         );
         return;
     }
     // separate video + audio streams need FFmpeg to be joined into one file
-    if fmt != "audio" && fmt != "single" && streams::ytdlp_path().is_some() && ffmpeg_path().is_none() {
+    if !transcript && fmt != "audio" && fmt != "single" && streams::ytdlp_path().is_some() && ffmpeg_path().is_none() {
         if FFMPEG_FETCHING.load(Ordering::SeqCst) {
             // queued behind the FFmpeg download
             PENDING.lock().push((video, Some(fmt)));
@@ -138,16 +148,16 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
         let v2 = video.clone();
         crate::ui::toast_with_actions(
             cx,
-            "Videos above 360p need FFmpeg to join video and audio",
+            translate("Videos above 360p need FFmpeg to join video and audio"),
             vec![
                 (
-                    format!("Get FFmpeg ({FFMPEG_SIZE})").into(),
+                    tf!("Get FFmpeg ({0})", FFMPEG_SIZE).into(),
                     Arc::new(move |_, cx: &mut App| {
                         PENDING.lock().push((video.clone(), Some(fmt.clone())));
                         fetch_ffmpeg(cx);
                     }),
                 ),
-                ("Download 360p".into(), Arc::new(move |_, cx: &mut App| start(v2.clone(), Some("single".into()), cx))),
+                (translate("Download 360p").into(), Arc::new(move |_, cx: &mut App| start(v2.clone(), Some("single".into()), cx))),
             ],
         );
         return;
@@ -165,10 +175,20 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
     };
     let jobs = d.jobs.clone();
     jobs.lock().push(job.clone());
-    toast(cx, format!("Downloading “{}”", video.title));
+    toast(cx, tf!("Downloading “{0}”", video.title));
     let jid = job.id;
     let cancel = job.cancel.clone();
     let jobs2 = jobs.clone();
+    let (saved, completion) = futures::channel::oneshot::channel();
+    if let Some(track) = &track {
+        let name = transcript::display_name(track).to_owned();
+        let srt = job.format == "srt";
+        cx.spawn(async move |cx| {
+            if completion.await.is_ok() {
+                let _ = cx.update(|cx| toast(cx, if srt { tf!("Subtitles saved · {0}", name) } else { tf!("Transcript saved · {0}", name) }));
+            }
+        }).detach();
+    }
     std::thread::spawn(move || {
         let update = |f: &dyn Fn(&mut Job)| {
             if let Some(j) = jobs2.lock().iter_mut().find(|j| j.id == jid) {
@@ -188,7 +208,7 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
             std::thread::sleep(std::time::Duration::from_millis(400));
         }
         update(&|j| j.status = JobStatus::Running);
-        let res = run_job(&job, &cancel, &|p, detail| {
+        let res = run_job(&job, track.as_ref(), &cancel, &|p, detail| {
             update(&|j| {
                 j.progress = p;
                 j.detail = detail.to_string();
@@ -196,10 +216,13 @@ pub fn start(video: VideoItem, format: Option<String>, cx: &mut App) {
         })
         .map(|path| resolve_output(&path, &job.video.id).unwrap_or(path));
         match res {
-            Ok(path) => update(&|j| {
-                j.status = JobStatus::Done(path.clone());
-                j.progress = 1.0;
-            }),
+            Ok(path) => {
+                update(&|j| {
+                    j.status = JobStatus::Done(path.clone());
+                    j.progress = 1.0;
+                });
+                let _ = saved.send(());
+            }
             Err(e) if cancel.load(Ordering::SeqCst) => {
                 let _ = e;
                 update(&|j| j.status = JobStatus::Cancelled)
@@ -249,10 +272,13 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn run_job(job: &Job, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyhow::Result<String> {
+fn run_job(job: &Job, track: Option<&CaptionTrack>, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyhow::Result<String> {
     let s = store::settings_snapshot();
     let dir = std::path::PathBuf::from(if s.download_dir.is_empty() { ".".into() } else { s.download_dir.clone() });
     std::fs::create_dir_all(&dir)?;
+    if TRANSCRIPTS.iter().any(|(format, _)| *format == job.format) {
+        return transcript::export(job, &dir, track, cancel);
+    }
     let url = format!("https://www.youtube.com/watch?v={}", job.video.id);
     if let Some(bin) = streams::ytdlp_path() {
         let fmt = match job.format.as_str() {
@@ -265,7 +291,7 @@ fn run_job(job: &Job, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyh
         let res = match ytdlp_run(&bin, &dir, &url, &fmt, &s, &[], None, cancel, progress) {
             Err(e) if e.to_string().contains("403") && !cancel.load(Ordering::SeqCst) => {
                 // a stream URL was refused: retry preferring the HLS formats, which don't need a PO token
-                progress(0.0, "Retrying…");
+                progress(0.0, translate("Retrying…"));
                 let hls = format!("{}/{}", fmt.replace("bv*", "bv*[protocol^=m3u8]"), fmt);
                 ytdlp_run(&bin, &dir, &url, &hls, &s, &[], None, cancel, progress)
             }
@@ -275,7 +301,7 @@ fn run_job(job: &Job, cancel: &AtomicBool, progress: &dyn Fn(f32, &str)) -> anyh
             Err(e) if retry_with_ios(&e.to_string()) && !cancel.load(Ordering::SeqCst) => {
                 // videos made for kids are refused to yt-dlp's default clients;
                 // the iOS client still serves them (its HLS formats need no PO token)
-                progress(0.0, "Retrying…");
+                progress(0.0, translate("Retrying…"));
                 match ytdlp_run(&bin, &dir, &url, &fmt, &s, &["--extractor-args", YTDLP_IOS], None, cancel, progress) {
                     Err(e2) if e2.to_string() == "cancelled" => Err(e2),
                     Err(_) if !cancel.load(Ordering::SeqCst) => {
@@ -345,7 +371,7 @@ fn ytdlp_run(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &store::
         }
         hide_window(&mut cmd);
         let mut child = cmd.spawn()?;
-        progress(0.0, "Getting video info…");
+        progress(0.0, translate("Getting video info…"));
         let stdout = child.stdout.take().unwrap();
         // drain stderr on its own thread so a chatty yt-dlp can't block on a full pipe
         let stderr = child.stderr.take().unwrap();
@@ -372,8 +398,8 @@ fn ytdlp_run(bin: &str, dir: &std::path::Path, url: &str, fmt: &str, s: &store::
                 }
                 last_pct = pct;
                 let overall = if phase == 0 { pct / 100.0 * 0.9 } else { 0.9 + pct / 100.0 * 0.1 };
-                let what = if phase == 0 { "" } else { "Audio · " };
-                let detail = if pct >= 100.0 { "Finishing…".to_string() } else { format!("{what}{pct:.0}% · {speed} · {eta} left") };
+                let what = if phase == 0 { "" } else { translate("Audio, ") };
+                let detail = if pct >= 100.0 { translate("Finishing…").to_string() } else { tf!("{0}{1}%, {2}, {3} left", what, format_args!("{:.0}", pct), speed, eta) };
                 progress(overall.min(0.99), &detail);
             } else if !line.starts_with('[') && !line.trim().is_empty() {
                 final_path = line.trim().to_string();
@@ -425,12 +451,12 @@ pub fn open_external(id: &str, cx: &mut App) {
 pub fn open_external_at(id: &str, time: f64, cx: &mut App) {
     let custom = store::settings_snapshot().external_player.trim().to_string();
     let id = id.to_string();
-    toast(cx, "Opening in your video player…");
+    toast(cx, translate("Opening in your video player…"));
     cx.spawn(async move |cx| {
         let res = crate::ui::blocking(move || launch_external(&id, time, &custom)).await;
         let _ = cx.update(|cx| match res {
-            Ok(name) => toast(cx, format!("Playing in {name}. Keep Stream Tube open while it plays")),
-            Err(e) => toast(cx, format!("Couldn't open a video player: {e}")),
+            Ok(name) => toast(cx, tf!("Playing in {0}. Keep Stream Tube open while it plays", name)),
+            Err(e) => toast(cx, tf!("Couldn't open a video player: {0}", e)),
         });
     })
     .detach();
@@ -552,10 +578,12 @@ fn open_with_default(info: &crate::api::types::StreamInfo, start: Option<u64>) -
     }
     m3u.push_str(&url);
     m3u.push('\n');
-    let path = std::env::temp_dir().join("streamtube-play.m3u");
+    // in the app's own (private) folder: a fixed name in the shared /tmp could be a
+    // symlink another user planted
+    let path = store::data_dir().join("streamtube-play.m3u");
     std::fs::write(&path, m3u)?;
     open::that(&path)?;
-    Ok("your default player".into())
+    Ok(translate("your default player").into())
 }
 
 /// Removes a finished/failed job from the list (the file stays).
@@ -580,10 +608,10 @@ pub fn delete_file(id: u64, cx: &mut App) {
     });
     if let Some(p) = path {
         match std::fs::remove_file(&p) {
-            Ok(()) => toast(cx, "Deleted from disk"),
+            Ok(()) => toast(cx, translate("Deleted from disk")),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                toast(cx, format!("Could not delete: {e}"));
+                toast(cx, tf!("Could not delete: {0}", e));
                 return;
             }
         }
@@ -599,6 +627,9 @@ pub fn resolve_output(path: &str, video_id: &str) -> Option<String> {
     if p.is_file() {
         return Some(path.to_string());
     }
+    if matches!(p.extension().and_then(|e| e.to_str()), Some("txt" | "srt")) {
+        return None; // A video with the same ID is not a missing transcript.
+    }
     let dir = if p.is_dir() { p.to_path_buf() } else { p.parent()?.to_path_buf() };
     let tag = format!("[{video_id}]");
     std::fs::read_dir(&dir)
@@ -606,7 +637,7 @@ pub fn resolve_output(path: &str, video_id: &str) -> Option<String> {
         .filter_map(Result::ok)
         .filter(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
-            n.contains(&tag) && !n.ends_with(".part") && !n.ends_with(".ytdl") && !n.ends_with(".tmp")
+            n.contains(&tag) && !n.ends_with(".txt") && !n.ends_with(".srt") && !n.ends_with(".part") && !n.ends_with(".ytdl") && !n.ends_with(".tmp")
         })
         .filter_map(|e| Some((e.metadata().ok()?.len(), e.path())))
         .max_by_key(|(len, _)| *len)
@@ -621,7 +652,7 @@ pub fn open_file(path: &str, cx: &mut App) {
         let id = name.rsplit_once('[')?.1.split_once(']')?.0.to_string();
         resolve_output(path, &id)
     }) else {
-        toast(cx, "File not found (moved or deleted)");
+        toast(cx, translate("File not found (moved or deleted)"));
         return;
     };
     // the default app is launched off the UI thread; Explorer is the most
@@ -831,7 +862,7 @@ pub fn fetch_ffmpeg(cx: &mut App) {
         return;
     }
     FFMPEG_PCT.store(0, Ordering::SeqCst);
-    toast(cx, "Downloading FFmpeg…");
+    toast(cx, translate("Downloading FFmpeg…"));
     repaint_while(&FFMPEG_FETCHING, cx);
     cx.spawn(async move |cx| {
         let res = crate::ui::blocking(|| -> anyhow::Result<()> {
@@ -882,12 +913,12 @@ pub fn fetch_ffmpeg(cx: &mut App) {
             let pending: Vec<_> = std::mem::take(&mut *PENDING.lock());
             match res {
                 Ok(()) => {
-                    toast(cx, "FFmpeg is ready");
+                    toast(cx, translate("FFmpeg is ready"));
                     for (v, f) in pending {
                         start(v, f, cx);
                     }
                 }
-                Err(e) => toast(cx, format!("FFmpeg download failed: {e}")),
+                Err(e) => toast(cx, tf!("FFmpeg download failed: {0}", e)),
             }
         });
     })
@@ -906,7 +937,7 @@ pub fn fetch_ytdlp(cx: &mut App) {
         return;
     }
     YTDLP_PCT.store(0, Ordering::SeqCst);
-    toast(cx, "Downloading yt-dlp…");
+    toast(cx, translate("Downloading yt-dlp…"));
     repaint_while(&YTDLP_FETCHING, cx);
     cx.spawn(async move |cx| {
         let res = crate::ui::blocking(|| -> anyhow::Result<()> {
@@ -936,12 +967,12 @@ pub fn fetch_ytdlp(cx: &mut App) {
             let pending: Vec<_> = std::mem::take(&mut *PENDING.lock());
             match res {
                 Ok(()) => {
-                    toast(cx, "yt-dlp is ready");
+                    toast(cx, translate("yt-dlp is ready"));
                     for (v, f) in pending {
                         start(v, f, cx);
                     }
                 }
-                Err(e) => toast(cx, format!("yt-dlp download failed: {e}")),
+                Err(e) => toast(cx, tf!("yt-dlp download failed: {0}", e)),
             }
         });
     })

@@ -42,26 +42,32 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Home, Shorts, Subscriptions, Explore categories, channels (including their courses and shows), playlists and search, with search suggestions and your recent searches
 - A personal Home without an account: "For you" recommends videos related to what you've watched and searched in the app, mixed with new uploads from your subscriptions. Signed in, Home is your own YouTube Home feed
 - A *Recently uploaded* chip on Home, like youtube.com's: videos from your Home feed and subscriptions uploaded in the last two weeks, newest first
-- Tabs: Ctrl+click anything (or *Open in new tab* in a video's menu) to open it in the background, and switch with Ctrl+Tab, Ctrl+1…9 or a click. Ctrl+T opens a new tab, Ctrl+W or a middle click closes one
+- Hover a video title in a grid or list to read the full title
+- Ctrl+click a link or middle-click a video to open it in a background tab. A video's menu also has *Open in new tab*. Switch with Ctrl+Tab, Ctrl+1…9 or a click. Ctrl+T opens a new tab. Ctrl+W or a middle click on the tab closes it.
 - Videos made for kids (YouTube Kids) play and download like any other video
 - Old video annotations are back: notes, speech bubbles and clickable links from YouTube's annotation archive, drawn over the video where they used to be (turn them off in *Settings → Player* or from the player's gear menu)
 - Arabic, Hebrew and other right-to-left text is shown in the right order
 - Shorts follow your account's recommendations when you're signed in, or start from the Shorts you watched last
+- Download the current Short from the vertical player's download button
 - libmpv player with hardware decoding, codec preference (AV1, VP9 or H.264), 360p up to 4K, enhanced bitrate, speed control (remembered per channel if you want), captions you can style (font, colour, opacity, background and edge, with a live preview), chapters and seek-bar preview thumbnails
 - A chapters panel beside the player, like youtube.com: click the chapter name in the player bar (or *View all* under the description) to list every chapter with its thumbnail, follow the one playing, and jump to any of them
 - Timestamps in descriptions and comments seek the video and bring the player back into view
 - Resumes where you left off, remembers your last quality, autoplays the next video or loops, and plays whole playlists as a queue
-- A miniplayer while you browse that you can drag anywhere and resize (it remembers where you put it), a picture-in-picture window, theater mode and fullscreen
-- Keeps playing when minimized, or pauses and resumes when you come back
+- A miniplayer while you browse that you can drag anywhere and resize (it remembers where you put it), a picture-in-picture window, theater mode and fullscreen. Theater mode is saved between launches and can be set in *Settings → Player*.
+- Keeps playing when minimized, or pauses and resumes when you come back. On Windows, active video playback keeps the display awake.
 - Live streams with live chat (Top chat or every message), and chatting when signed in
 - Shorts in a vertical player that moves to the next one by itself, or open them in the regular player. Shorts comments open their replies as threads too
-- Hold Space or press and hold on the video to play at 2x
+- Hold Space or press and hold the main video to play at 2x
+- Press `+` / `-` or `>` / `<` to move to the next or previous 0.25x playback speed step
 - Hover previews: rest the pointer on a thumbnail and it plays inside it, muted, with a seek bar to skip around
 - Most replayed graph with "jump ahead", ambient glow around the player (on or off from the player's gear menu), force original audio instead of auto-dubbing
+- Aspect ratio controls for ultrawide screens, like the Ultrawidify extension: *Auto* finds a film's black bars and crops them away so it fills a 21:9 or 32:9 monitor, or pick 21:9, 18:9 or 32:9, *Zoom to fill* or *Stretch*. Choose it from the player's gear menu or *Settings → Player*, or press *Z* to cycle
 - A screenshot button in the player bar
+- Step one frame at a time with `,` or `.` while paused, or with Previous frame and Next frame in the player's right-click menu
 - Comments sorted by Top, Timed or Newest. *Timed* works like youtube.com: comments that mention a moment of the video appear as playback reaches it
 - Comments show animated GIFs, stickers and channel emojis, and replies are drawn as threads, with answers to a reply nested under it. Long comments and channel descriptions are shortened with *Read more* / *Show more*
-- Keyboard shortcuts for everything you'd expect (play/pause, seek, volume, captions, fullscreen, theater, picture-in-picture, next/previous, and Ctrl+←/→ for the previous/next chapter)
+- Keyboard shortcuts for playback, seek, volume, captions, fullscreen, theater, picture-in-picture and the queue. Z changes the aspect ratio and Ctrl+←/→ changes chapters. Playback letter keys also work with the Russian layout.
+- Arrow keys briefly show the volume or the number of seconds skipped over the video
 - "Open in external player" with no setup: it uses VLC or mpv if one is installed, otherwise your default video player, and continues from where you were
 - Right-click the video for loop, copy link (optionally at the current time), screenshot and **Stats for nerds**: resolution, codecs, dropped frames, hardware decoding, bitrate, buffer health and connection speed, updated live (also *Shift+I*)
 
@@ -90,6 +96,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 
 **Downloads**
 - Download video or audio in any quality through yt-dlp, with SponsorBlock chapters, from a download manager with progress
+- Save a transcript as plain text (.txt) or timestamped subtitles (.srt) from the Download menu. A single caption track downloads immediately. If several tracks are available, choose the language; automatically generated tracks are labeled in the picker.
 - Without yt-dlp it falls back to the built-in downloader (360p/720p or audio)
 - yt-dlp and FFmpeg can be fetched from inside the app, on Windows and Linux (*Settings → Downloads*), with a progress bar, so nothing has to be installed by hand
 
@@ -100,12 +107,13 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Network**
 - A proxy setting (HTTP or SOCKS) that covers browsing, playback, thumbnails, downloads and sign-in
 - On Linux, a choice of Wayland or X11, with an automatic switch to X11 if a Wayland window never shows up (ChromeOS)
-- IPv4-only mode, and a choice of playback client (visionOS, Android VR or yt-dlp) if videos ever stop loading
+- IPv4-only mode applies to new requests as soon as you change it. You can also choose a playback client (visionOS, Android VR or yt-dlp).
 
 **Looks the way you like**
 - Dark, light or follow Windows
 - Seven accent colours used across the app, and the app icon changes colour to match, on the taskbar and on your desktop shortcuts too
 - Interface scaling, density, thumbnail corner style, grid columns, start page, language and region
+- English, Azerbaijani, French, German, Japanese, Kazakh, Russian, Turkish, Ukrainian, Simplified Chinese and Traditional Chinese in *Settings → General → App language*. YouTube has a separate language setting.
 - Smooth page, dialog and menu transitions, and mouse-wheel scrolling that glides instead of jumping
 - Scrollbars you can drag (shown on hover, or always), and pages scroll from the keyboard too: Page Up/Down, Home/End, the arrow keys and Space
 
@@ -162,8 +170,12 @@ This is an early alpha, so expect rough edges.
 **Windows 10/11 (64-bit)**: run `StreamTube-<version>-setup.exe`. It installs for
 your user only, so no administrator prompt, and the app updates itself when a new
 release comes out (*Settings → About*).
-To run it without installing, unzip `StreamTube-<version>-windows-x64.zip` and run
-`streamtube.exe`. It doesn't need the Visual C++ runtime.
+To run it without installing, choose *Extract All* on
+`StreamTube-<version>-windows-x64.zip`, then open `streamtube.exe` in the extracted
+folder with `libmpv-2.dll` beside it. It doesn't need the Visual C++ runtime.
+After you extract a build with portable update support, use *Settings → About*
+for future updates. Stream Tube replaces the app files in that folder and
+restarts with the same settings and history.
 Older PCs whose graphics driver has no Vulkan support (for example Intel HD 4000)
 work too: the app carries its own Vulkan loader for libmpv and uses it only when
 Windows doesn't have one.
@@ -171,21 +183,21 @@ Windows doesn't have one.
 **Debian, Ubuntu, Mint**: install the `.deb`. This also installs libmpv:
 
 ```sh
-sudo apt install ./streamtube_0.7.2-alpha_amd64.deb
+sudo apt install ./streamtube_0.7.5-alpha_amd64.deb
 ```
 
 **Fedora, openSUSE**: install the `.rpm`:
 
 ```sh
-sudo dnf install ./streamtube-0.7.2-alpha.x86_64.rpm
+sudo dnf install ./streamtube-0.7.5-alpha.x86_64.rpm
 ```
 
 **Any Linux (x86_64), nothing to install**: download the AppImage, make it executable
 and run it. libmpv is inside, so video plays without installing anything else:
 
 ```sh
-chmod +x StreamTube-0.7.2-alpha-x86_64.AppImage
-./StreamTube-0.7.2-alpha-x86_64.AppImage
+chmod +x StreamTube-0.7.5-alpha-x86_64.AppImage
+./StreamTube-0.7.5-alpha-x86_64.AppImage
 ```
 
 **Other Linux (x86_64), installed for your user**: unpack `StreamTube-<version>-linux-x86_64.tar.gz` and run
@@ -220,11 +232,11 @@ and each file has a signed build provenance attestation that ties it to the work
 run that built it. With the [GitHub CLI](https://cli.github.com):
 
 ```sh
-gh attestation verify StreamTube-0.7.2-alpha-setup.exe --repo Avaneesh-Inamdar/Stream-Tube-Desktop
+gh attestation verify StreamTube-0.7.5-alpha-setup.exe --repo Avaneesh-Inamdar/Stream-Tube-Desktop
 ```
 
-Releases are immutable once published, so their files can't be swapped afterwards.
-The in-app updater also checks the installer's SHA-256 before running it.
+Check a download against those before running it. The in-app updater also checks
+the installer's SHA-256 before running it.
 
 ## Building
 
@@ -252,7 +264,7 @@ else, copy `libmpv-2.dll` next to it.
 To build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:
 
 ```powershell
-ISCC.exe /DAppVersion=0.7.2-alpha installer\streamtube.iss
+ISCC.exe /DAppVersion=0.7.5-alpha installer\streamtube.iss
 ```
 
 It lands in `dist\`. On Linux, install the packages listed in
@@ -301,6 +313,9 @@ Stream Tube leans on a lot of other people's work:
 [Return YouTube Dislike](https://returnyoutubedislike.com),
 [GPUI](https://www.gpui.rs), [FFmpeg](https://ffmpeg.org) and the annotation archive saved by
 [Archive Team](https://wiki.archiveteam.org/index.php/YouTube/Annotations).
+
+Thanks also to everyone who has sent fixes and features; each release's notes name
+who did what, and the full list is on the [contributors page](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/graphs/contributors).
 
 It's an independent project and isn't affiliated with or endorsed by YouTube or Google.
 

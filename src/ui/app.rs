@@ -1,9 +1,10 @@
 //! Application shell: routing, top bar, sidebar, overlays, keyboard shortcuts.
 use super::pages::*;
+use crate::i18n::{t, tf};
 use super::*;
 use crate::api::innertube;
 use crate::api::types::VideoItem;
-use crate::player::controller::{Player, player};
+use crate::player::controller::{KeyboardFeedback, Player, player};
 use crate::player::view::PlayerView;
 use crate::store;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -52,8 +53,13 @@ impl Route {
 
 #[derive(Clone, Copy, Default)]
 pub struct UiState {
-    pub theater: bool,
     pub fullscreen: bool,
+    /// theater layout: the player covers the page
+    pub theater: bool,
+    /// the Shorts page is showing
+    pub shorts: bool,
+    /// fullscreen layout inside the window, without OS fullscreen
+    pub windowed: bool,
     pub sidebar_open: bool,
     /// Keep the home feed through reloads instead of replacing it (topbar pin).
     pub preserve_home: bool,
@@ -62,8 +68,66 @@ pub struct UiState {
 }
 impl Global for UiState {}
 
+const COLLAPSED_SIDEBAR_WIDTH: f32 = 88.0;
+
 pub struct AppHandle(pub WeakEntity<AppView>);
 impl Global for AppHandle {}
+
+fn shortcut_key(key: &str) -> &str {
+    // Match the US key positions when the platform reports Russian characters.
+    match key {
+        "ф" | "Ф" => "a",
+        "и" | "И" => "b",
+        "с" | "С" => "c",
+        "в" | "В" => "d",
+        "у" | "У" => "e",
+        "а" | "А" => "f",
+        "п" | "П" => "g",
+        "р" | "Р" => "h",
+        "ш" | "Ш" => "i",
+        "о" | "О" => "j",
+        "л" | "Л" => "k",
+        "д" | "Д" => "l",
+        "ь" | "Ь" => "m",
+        "т" | "Т" => "n",
+        "щ" | "Щ" => "o",
+        "з" | "З" => "p",
+        "й" | "Й" => "q",
+        "к" | "К" => "r",
+        "ы" | "Ы" => "s",
+        "е" | "Е" => "t",
+        "г" | "Г" => "u",
+        "м" | "М" => "v",
+        "ц" | "Ц" => "w",
+        "ч" | "Ч" => "x",
+        "н" | "Н" => "y",
+        "я" | "Я" => "z",
+        "б" => ",",
+        "Б" => "<",
+        "ю" => ".",
+        "Ю" => ">",
+        "э" => "'",
+        "Э" => "\"",
+        _ => key,
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::shortcut_key;
+
+    #[::core::prelude::v1::test]
+    fn accepts_russian_shortcut_keys() {
+        assert_eq!(shortcut_key("л"), "k");
+        assert_eq!(shortcut_key("Ш"), "i");
+        assert_eq!(shortcut_key("е"), "t");
+        assert_eq!(shortcut_key("б"), ",");
+        assert_eq!(shortcut_key("Ю"), ">");
+        assert_eq!(shortcut_key("э"), "'");
+        assert_eq!(shortcut_key("left"), "left");
+        assert_eq!(shortcut_key("m"), "m");
+    }
+}
 
 /// The page a YouTube (or `streamtube:`) link opens, if it's one we understand.
 pub fn route_from_link(arg: &str) -> Option<Route> {
@@ -177,9 +241,7 @@ pub fn go_back(window: &mut Window, cx: &mut App) {
 
 /// Leaves the watch page while keeping playback (mini player).
 pub fn go_back_keep_playing(window: &mut Window, cx: &mut App) {
-    if cx.global::<UiState>().fullscreen {
-        toggle_fullscreen(window, cx);
-    }
+    exit_fullscreen(window, cx);
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| {
             if a.history.is_empty() {
@@ -194,8 +256,48 @@ pub fn go_back_keep_playing(window: &mut Window, cx: &mut App) {
 pub fn toggle_fullscreen(window: &mut Window, cx: &mut App) {
     window.toggle_fullscreen();
     let ui = cx.global_mut::<UiState>();
-    ui.fullscreen = !ui.fullscreen;
+    if ui.windowed {
+        // windowed fullscreen -> real fullscreen, the layout stays the same
+        ui.windowed = false;
+    } else {
+        ui.fullscreen = !ui.fullscreen;
+    }
     cx.refresh_windows();
+}
+
+pub fn toggle_theater_mode(cx: &mut App) {
+    store::update_settings(|settings| settings.theater_mode = !settings.theater_mode);
+    cx.refresh_windows();
+}
+
+/// The player fills the whole window (no top bar, sidebar or page) without going
+/// to OS fullscreen, like the "Windowed FullScreen" browser extension.
+pub fn toggle_windowed_fullscreen(window: &mut Window, cx: &mut App) {
+    let ui = cx.global_mut::<UiState>();
+    if ui.windowed {
+        ui.windowed = false;
+        ui.fullscreen = false;
+    } else if ui.fullscreen {
+        // real fullscreen -> windowed fullscreen
+        window.toggle_fullscreen();
+        ui.windowed = true;
+    } else {
+        ui.fullscreen = true;
+        ui.windowed = true;
+    }
+    cx.refresh_windows();
+}
+
+/// Leaves either kind of fullscreen.
+pub fn exit_fullscreen(window: &mut Window, cx: &mut App) {
+    let ui = cx.global_mut::<UiState>();
+    if ui.windowed {
+        ui.windowed = false;
+        ui.fullscreen = false;
+        cx.refresh_windows();
+    } else if ui.fullscreen {
+        toggle_fullscreen(window, cx);
+    }
 }
 
 /// Called by the player when the queue advances so the watch page follows.
@@ -208,6 +310,10 @@ pub fn sync_watch_route(id: String, cx: &mut App) {
             }
         });
     }
+}
+
+pub fn is_current_page(page: EntityId, cx: &App) -> bool {
+    cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()).is_some_and(|app| app.read(cx).page.entity_id() == page)
 }
 
 pub fn has_autoplay_next(cx: &App) -> bool {
@@ -249,12 +355,18 @@ impl MenuItem {
     }
 }
 
+#[derive(Clone)]
+pub enum MenuContent {
+    Items(Vec<MenuItem>),
+    View(AnyView),
+}
+
 #[derive(Default)]
-pub struct OpenMenu(pub Option<(Point<Pixels>, Vec<MenuItem>)>);
+pub struct OpenMenu(pub Option<(Point<Pixels>, MenuContent)>);
 impl Global for OpenMenu {}
 
 pub fn open_menu(pos: Point<Pixels>, items: Vec<MenuItem>, _window: &mut Window, cx: &mut App) {
-    cx.set_global(OpenMenu(Some((pos, items))));
+    cx.set_global(OpenMenu(Some((pos, MenuContent::Items(items)))));
     cx.refresh_windows();
 }
 
@@ -352,7 +464,7 @@ pub fn import_web_cookies(cx: &mut App) {
                 });
             }
             match res {
-                Ok(name) => toast(cx, format!("Connected as {name}. What you watch now shows in your YouTube history.")),
+                Ok(name) => toast(cx, tf!("Connected as {0}. What you watch now shows in your YouTube history.", name)),
                 Err(e) => toast(cx, crate::ui::friendly_error(&format!("{e:#}"))),
             }
             cx.refresh_windows();
@@ -363,7 +475,7 @@ pub fn import_web_cookies(cx: &mut App) {
 
 pub fn disconnect_web(cx: &mut App) {
     crate::api::web::disconnect();
-    toast(cx, "Browser sign-in disconnected");
+    toast(cx, t("Browser sign-in disconnected"));
     cx.refresh_windows();
 }
 
@@ -375,7 +487,7 @@ pub fn open_sign_in(_window: &mut Window, cx: &mut App) {
 
 pub fn sign_out(cx: &mut App) {
     crate::api::auth::sign_out();
-    toast(cx, "Signed out");
+    toast(cx, t("Signed out"));
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| {
             a.reload_page = true;
@@ -421,7 +533,8 @@ pub fn open_dialog(d: Dialog, window: &mut Window, cx: &mut App) {
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| {
             a.dialog_input.update(cx, |i, cx| i.set_value("", window, cx));
-            if let Dialog::TextPrompt { .. } = &d {
+            if let Dialog::TextPrompt { placeholder, .. } = &d {
+                a.dialog_input.update(cx, |input, cx| input.set_placeholder(t(placeholder).to_string(), window, cx));
                 let fh = a.dialog_input.read(cx).focus_handle(cx);
                 window.focus(&fh, cx);
             }
@@ -569,6 +682,8 @@ pub struct AppView {
     had_video: bool,
     last_bounds_save: std::time::Instant,
     dialog: Option<Dialog>,
+    /// the signed-in account's playlists for the Save dialog (None while loading)
+    yt_playlists: Option<Vec<crate::api::types::PlaylistItem>>,
     dialog_input: Entity<InputState>,
     focus: FocusHandle,
     pending_watch_sync: Option<String>,
@@ -599,6 +714,7 @@ pub struct AppView {
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::idle_inhibit::set_main_window(cx, window);
         cx.set_global(AppHandle(cx.entity().downgrade()));
         let preserve_home = store::kv_get("preserve_home").as_deref() == Some("1");
         cx.set_global(UiState { sidebar_open: true, preserve_home, ..Default::default() });
@@ -606,7 +722,7 @@ impl AppView {
         crate::downloads::load_history(cx);
         cx.set_global(AutoplayNext::default());
         cx.set_global(crate::ui::cards::Watched(store::progress_map()));
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search or paste a YouTube link"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(t("Search or paste a YouTube link")));
         let dialog_input = cx.new(|cx| InputState::new(window, cx));
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(&search, window, |this: &mut Self, state, ev: &InputEvent, window, cx| match ev {
@@ -747,14 +863,14 @@ impl AppView {
                     }
                     if !pl.read(cx).paused && pl.read(cx).video.is_some() {
                         pl.update(cx, |p, cx| {
-                            p.set_paused(true);
+                            p.set_paused(true, cx);
                             cx.notify();
                         });
                         paused_by_us.set(true);
                     }
                 } else if paused_by_us.replace(false) {
                     pl.update(cx, |p, cx| {
-                        p.set_paused(false);
+                        p.set_paused(false, cx);
                         cx.notify();
                     });
                 }
@@ -776,7 +892,13 @@ impl AppView {
         let preview_view = cx.new(crate::player::preview::PreviewView::new);
         let images = crate::ui::image_cache::init(cx);
         // re-render (to add or drop the preview layer) only when a preview starts or ends
-        subs.push(cx.subscribe(&crate::player::preview::preview(cx), |_, _, _: &crate::player::preview::PreviewEvent, cx| cx.notify()));
+        subs.push(cx.subscribe(&crate::player::preview::preview(cx), |this, _, event, cx| {
+            if matches!(event, crate::player::preview::PreviewEvent::TargetChanged) {
+                // Repaint the cached page once so the hovered thumbnail records its bounds.
+                App::notify(cx, this.page.entity_id());
+            }
+            cx.notify();
+        }));
         cx.set_global(crate::ui::slot::PlayerSlot::default());
         crate::perf::mark("app shell");
         let page = build_page(&start, window, cx);
@@ -829,6 +951,7 @@ impl AppView {
             had_video: false,
             last_bounds_save: std::time::Instant::now(),
             dialog: None,
+            yt_playlists: None,
             dialog_input,
             focus,
             pending_watch_sync: None,
@@ -890,7 +1013,7 @@ impl AppView {
                     return;
                 }
                 if Instant::now() > deadline {
-                    return fail(&this, cx, "The code expired. Try again.".into());
+                    return fail(&this, cx, t("The code expired. Try again.").into());
                 }
                 let d = dc.clone();
                 match blocking(move || auth::poll_login(&d)).await {
@@ -901,7 +1024,7 @@ impl AppView {
                             t.dialog = None;
                             t.login.code = None;
                             t.reload_page = true;
-                            toast(cx, format!("Signed in as {}", acc.name));
+                            toast(cx, tf!("Signed in as {0}", acc.name));
                             cx.notify();
                         });
                         // bring the account's history and subscriptions to this device
@@ -910,7 +1033,7 @@ impl AppView {
                         let _ = this.update(cx, |t, cx| {
                             if let Ok(n) = res {
                                 if n > 0 {
-                                    toast(cx, format!("Added {n} subscriptions from your account"));
+                                    toast(cx, tf!("Added {0} subscriptions from your account", n));
                                     t.reload_page = true;
                                     cx.notify();
                                 }
@@ -974,7 +1097,7 @@ impl AppView {
                         if matches!(t.dialog, Some(Dialog::WebSignIn)) {
                             t.dialog = None;
                         }
-                        toast(cx, format!("Connected as {name}. What you watch now shows in your YouTube history."));
+                        toast(cx, tf!("Connected as {0}. What you watch now shows in your YouTube history.", name));
                         cx.refresh_windows();
                     }
                     Err(e) => {
@@ -998,7 +1121,7 @@ impl AppView {
                 .items_center()
                 .gap_3()
                 .child(icon("history").size_6().text_color(p.text))
-                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Connect your YouTube history")),
+                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t("Connect your YouTube history"))),
         );
         let cookies_link = div()
             .id("wsi-cookies")
@@ -1006,7 +1129,7 @@ impl AppView {
             .text_color(p.link)
             .cursor_pointer()
             .hover(|s| s.underline())
-            .child("Use a cookies.txt file instead")
+            .child(t("Use a cookies.txt file instead"))
             .on_click(|_, _, cx| import_web_cookies(cx));
         let cancel = pill("wsi-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
             if let Some(c) = this.web_login.cancel.take() {
@@ -1039,12 +1162,12 @@ impl AppView {
                         .gap_2()
                         .text_sm()
                         .text_color(p.text2)
-                        .child(format!("Sign in to YouTube in the {browser} window that opened. It closes by itself when you're done."))
+                        .child(tf!("Sign in to YouTube in the {0} window that opened. It closes by itself when you're done.", browser))
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(p.text3)
-                                .child("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards."),
+                                .child(t("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards.")),
                         ),
                 )
                 .child(
@@ -1052,7 +1175,7 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().flex().items_center().gap_2().child(spinner(cx)).child(div().text_xs().text_color(p.text3).child("Waiting for sign-in…")))
+                        .child(div().flex().items_center().gap_2().child(spinner(cx)).child(div().text_xs().text_color(p.text3).child(t("Waiting for sign-in…"))))
                         .child(cancel),
                 )
                 .child(cookies_link);
@@ -1068,12 +1191,13 @@ impl AppView {
                 .items_center()
                 .gap_3()
                 .child(icon("circle-user").size_6().text_color(p.text))
-                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Sign in to YouTube")),
+                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t("Sign in to YouTube"))),
         );
         if let Some(err) = &self.login.error {
             col = col.child(div().text_sm().text_color(p.text2).child(err.clone())).child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .justify_end()
                     .gap_2()
                     .child(pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
@@ -1097,7 +1221,7 @@ impl AppView {
                         .text_sm()
                         .text_color(p.text2)
                         .child(
-                            div().flex().gap_1().child("1. On any device, go to").child(
+                            div().flex().flex_wrap().gap_x_1().child(t("1. On any device, go to")).child(
                                 div()
                                     .id("si-url")
                                     .text_color(p.link)
@@ -1109,7 +1233,7 @@ impl AppView {
                                     }),
                             ),
                         )
-                        .child("2. Enter this code and pick your account"),
+                        .child(t("2. Enter this code and pick your account")),
                 )
                 .child(
                     div()
@@ -1130,27 +1254,23 @@ impl AppView {
                         .child(code.clone())
                         .on_click(move |_, _, cx| copy_to_clipboard(code2.clone(), cx)),
                 )
+                .child(div().text_xs().text_color(p.text3).child(t("Waiting for approval…")))
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().text_xs().text_color(p.text3).child("Waiting for approval…"))
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
-                                    this.dialog = None;
-                                    cx.notify();
-                                })))
-                                .child(pill("si-open", Some("external-link"), "Copy code & open", cx).bg(p.link).text_color(white()).on_click(
-                                    move |_, _, cx| {
-                                        copy_to_clipboard(code.clone(), cx);
-                                        let _ = open::that(&url);
-                                    },
-                                )),
-                        ),
+                        .flex_wrap()
+                        .justify_end()
+                        .gap_2()
+                        .child(pill("si-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
+                            this.dialog = None;
+                            cx.notify();
+                        })))
+                        .child(pill("si-open", Some("external-link"), "Copy code & open", cx).bg(p.link).text_color(white()).on_click(
+                            move |_, _, cx| {
+                                copy_to_clipboard(code.clone(), cx);
+                                let _ = open::that(&url);
+                            },
+                        )),
                 );
         } else {
             col = col.child(
@@ -1160,7 +1280,7 @@ impl AppView {
                     .gap_3()
                     .py_4()
                     .child(spinner(cx))
-                    .child(div().text_sm().text_color(p.text2).child("Getting a code…")),
+                    .child(div().text_sm().text_color(p.text2).child(t("Getting a code…"))),
             );
         }
         col.into_any_element()
@@ -1187,7 +1307,7 @@ impl AppView {
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover))
                 .child(icon("circle-user").size_5().text_color(p.link))
-                .child("Sign in")
+                .child(t("Sign in"))
                 .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
                 .into_any_element();
         }
@@ -1212,9 +1332,9 @@ impl AppView {
                 let handle = acc.handle.clone();
                 let items = vec![
                     MenuItem::new("circle-user", label, |_, _| {}),
-                    MenuItem::new("square-user", "Your channel", move |_, cx| {
+                    MenuItem::new("square-user", t("Your channel"), move |_, cx| {
                         let Some(h) = handle.clone() else {
-                            toast(cx, "Channel handle unknown");
+                            toast(cx, t("Channel handle unknown"));
                             return;
                         };
                         let url = format!("https://www.youtube.com/{}", if h.starts_with('@') { h } else { format!("@{h}") });
@@ -1226,22 +1346,22 @@ impl AppView {
                                         let _ = w.update(cx, |_, window, cx| navigate(Route::Channel(id), window, cx));
                                     }
                                 }
-                                _ => toast(cx, "Could not open your channel"),
+                                _ => toast(cx, t("Could not open your channel")),
                             });
                         })
                         .detach();
                     }),
-                    MenuItem::new("history", "History", |window, cx| navigate(Route::History, window, cx)),
-                    MenuItem::new("list-video", "Playlists", |window, cx| navigate(Route::Library, window, cx)),
-                    MenuItem::new("download", "Downloads", |window, cx| navigate(Route::Downloads, window, cx)),
-                    MenuItem::new("settings", "Settings", |window, cx| navigate(Route::Settings, window, cx)),
-                    MenuItem::new("refresh-cw", "Sync subscriptions", |_, cx| {
+                    MenuItem::new("history", t("History"), |window, cx| navigate(Route::History, window, cx)),
+                    MenuItem::new("list-video", t("Playlists"), |window, cx| navigate(Route::Library, window, cx)),
+                    MenuItem::new("download", t("Downloads"), |window, cx| navigate(Route::Downloads, window, cx)),
+                    MenuItem::new("settings", t("Settings"), |window, cx| navigate(Route::Settings, window, cx)),
+                    MenuItem::new("refresh-cw", t("Sync subscriptions"), |_, cx| {
                         cx.spawn(async move |cx| {
                             let res = blocking(crate::api::auth::sync_subscriptions).await;
                             let _ = cx.update(|cx| {
                                 match res {
-                                    Ok(0) => toast(cx, "Subscriptions are up to date"),
-                                    Ok(n) => toast(cx, format!("Added {n} subscriptions")),
+                                    Ok(0) => toast(cx, t("Subscriptions are up to date")),
+                                    Ok(n) => toast(cx, tf!("Added {0} subscriptions", n)),
                                     Err(e) => toast(cx, crate::ui::friendly_error(&e.to_string())),
                                 }
                                 cx.refresh_windows();
@@ -1249,13 +1369,13 @@ impl AppView {
                         })
                         .detach();
                     }),
-                    MenuItem::new("users", "Switch account", |_, cx| {
+                    MenuItem::new("users", t("Switch account"), |_, cx| {
                         sign_out(cx);
                         if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
                             app.update(cx, |a, cx| a.start_sign_in(cx));
                         }
                     }),
-                    MenuItem::new("log-out", "Sign out", |_, cx| sign_out(cx)),
+                    MenuItem::new("log-out", t("Sign out"), |_, cx| sign_out(cx)),
                 ];
                 open_menu(ev.position(), items, window, cx);
             })
@@ -1289,13 +1409,15 @@ impl AppView {
         if route == self.route {
             // re-navigating to the same place refreshes it (like clicking Home again)
             if !matches!(route, Route::Watch { .. }) {
+                crate::ui::slot::clear_slot(cx);
                 self.page = build_page(&route, window, cx);
                 cx.notify();
             }
             return;
         }
-        if cx.global::<UiState>().fullscreen && !matches!(route, Route::Watch { .. }) {
-            toggle_fullscreen(window, cx);
+        crate::ui::slot::clear_slot(cx);
+        if cx.global::<UiState>().fullscreen && !matches!(route, Route::Watch { .. } | Route::Shorts(_)) {
+            exit_fullscreen(window, cx);
         }
         let page = build_page(&route, window, cx);
         let old_route = std::mem::replace(&mut self.route, route);
@@ -1396,8 +1518,9 @@ impl AppView {
             Some(p) => p,
             None => build_page(&self.route.clone(), window, cx),
         };
-        if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. }) {
-            toggle_fullscreen(window, cx);
+        crate::ui::slot::clear_slot(cx);
+        if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
+            exit_fullscreen(window, cx);
         }
         let pl = next.player.clone();
         self.main_view.update(cx, |v, cx| v.set_player(pl.clone(), cx));
@@ -1479,7 +1602,7 @@ impl AppView {
                 let p = player.read(cx);
                 p.video.as_ref().filter(|v| &v.id == id && !v.title.is_empty()).map(|v| v.title.clone()).unwrap_or_else(|| "Video".into())
             }
-            Route::Channel(id) => store::subscriptions().into_iter().find(|s| &s.channel_id == id).map(|s| s.name).unwrap_or_else(|| "Channel".into()),
+            Route::Channel(id) => store::subscriptions().into_iter().find(|s| &s.channel_id == id).map(|s| s.name).unwrap_or_else(|| t("Channel").into()),
             r => r.title(),
         }
     }
@@ -1900,9 +2023,13 @@ impl AppView {
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((r, p)) = self.history.pop() {
+            crate::ui::slot::clear_slot(cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.forward.push((cur_r, cur_p));
+            if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
+                toggle_fullscreen(window, cx);
+            }
             // If we return to a watch page for a different video than is playing, rebuild it
             if let Route::Watch { id, .. } = &self.route {
                 let playing = player(cx).read(cx).video.as_ref().map(|v| v.id.clone());
@@ -1918,9 +2045,13 @@ impl AppView {
 
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((r, p)) = self.forward.pop() {
+            crate::ui::slot::clear_slot(cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
             self.history.push((cur_r, cur_p));
+            if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
+                toggle_fullscreen(window, cx);
+            }
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
             self.save_tabs(cx);
             cx.notify();
@@ -1997,7 +2128,7 @@ impl AppView {
                     Ok(innertube::ResolvedUrl::Channel(id)) => a.go(Route::Channel(id), window, cx),
                     Ok(innertube::ResolvedUrl::Playlist(id)) => a.go(Route::Playlist(id), window, cx),
                     Ok(innertube::ResolvedUrl::Video(id)) => a.go(Route::Watch { id, playlist: None, start: None }, window, cx),
-                    Err(e) => toast(cx, format!("Could not open link: {}", crate::ui::friendly_error(&e.to_string()))),
+                    Err(e) => toast(cx, tf!("Could not open link: {0}", crate::ui::friendly_error(&e.to_string()))),
                 });
             })
             .detach();
@@ -2149,22 +2280,22 @@ impl AppView {
                     .gap_2()
                     .py_8()
                     .child(icon("download").size_8().text_color(p.text3))
-                    .child(div().text_sm().text_color(p.text2).child("No downloads yet")),
+                    .child(div().text_sm().text_color(p.text2).child(t("No downloads yet"))),
             );
         }
         for j in jobs.iter().take(50) {
             let id = j.id;
             let title = if j.video.title.is_empty() { j.video.id.clone() } else { j.video.title.clone() };
             let (line, color, running) = match &j.status {
-                JobStatus::Queued => ("Waiting…".to_string(), p.text2, true),
-                JobStatus::Running => (format!("{:.0}%  {}", j.progress * 100.0, j.detail.split("at").nth(1).map(|s| format!("· {}", s.trim())).unwrap_or_default()), p.text2, true),
+                JobStatus::Queued => (t("Waiting…").to_string(), p.text2, true),
+                JobStatus::Running => (format!("{:.0}%{}", j.progress * 100.0, j.detail.split("at").nth(1).map(|s| format!(", {}", s.trim())).unwrap_or_default()), p.text2, true),
                 JobStatus::Done(path) => (
-                    std::fs::metadata(path).map(|m| format!("{:.1} MB · {}", m.len() as f64 / 1e6, j.format)).unwrap_or_else(|_| "File missing".into()),
+                    std::fs::metadata(path).map(|m| tf!("{0} MB, {1}", format_args!("{:.1}", m.len() as f64 / 1e6), j.format)).unwrap_or_else(|_| t("File missing").into()),
                     p.text2,
                     false,
                 ),
-                JobStatus::Failed(e) => (format!("Failed: {e}"), rgb(0xff4e45).into(), false),
-                JobStatus::Cancelled => ("Cancelled".into(), p.text2, false),
+                JobStatus::Failed(e) => (tf!("Failed: {0}", e), rgb(0xff4e45).into(), false),
+                JobStatus::Cancelled => (t("Cancelled").into(), p.text2, false),
             };
             let done_path = if let JobStatus::Done(pth) = &j.status { Some(pth.clone()) } else { None };
             let open_path = done_path.clone();
@@ -2192,7 +2323,7 @@ impl AppView {
                         .rounded_md()
                         .overflow_hidden()
                         .bg(p.chip)
-                        .child(img(j.video.thumbnail.clone()).size_full().object_fit(ObjectFit::Cover)),
+                        .child(img(j.video.thumbnail.clone()).size_full().rounded_md().object_fit(ObjectFit::Cover)),
                 )
                 .child(
                     div()
@@ -2222,16 +2353,16 @@ impl AppView {
                 }));
             } else {
                 if let Some(pth) = done_path.clone() {
-                    row = row.child(small_btn(SharedString::from(format!("dlp-f-{id}")), "folder-open", "Show in folder").on_click(move |_, _, cx| {
+                    row = row.child(small_btn(SharedString::from(format!("dlp-f-{id}")), "folder-open", t("Show in folder")).on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         reveal_in_folder(&pth, cx);
                     }));
-                    row = row.child(small_btn(SharedString::from(format!("dlp-d-{id}")), "trash-2", "Delete file").on_click(move |_, _, cx| {
+                    row = row.child(small_btn(SharedString::from(format!("dlp-d-{id}")), "trash-2", t("Delete file")).on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         downloads::delete_file(id, cx)
                     }));
                 }
-                row = row.child(small_btn(SharedString::from(format!("dlp-r-{id}")), "x", "Remove from list").on_click(move |_, _, cx| {
+                row = row.child(small_btn(SharedString::from(format!("dlp-r-{id}")), "x", t("Remove from list")).on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     downloads::remove(id, cx)
                 }));
@@ -2249,7 +2380,7 @@ impl AppView {
                 .text_color(p.link)
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover))
-                .child(label)
+                .child(t(label))
         };
         let has_finished = jobs.iter().any(|j| !matches!(j.status, JobStatus::Running | JobStatus::Queued));
         Some(
@@ -2289,7 +2420,7 @@ impl AppView {
                                     .px_4()
                                     .pt_3()
                                     .pb_2()
-                                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Downloads"))
+                                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t("Downloads")))
                                     .when(has_finished, |d| {
                                         d.child(footer_btn("dlp-clear", "Clear list").on_click(|_, _, cx| downloads::clear_history(cx)))
                                     }),
@@ -2331,7 +2462,7 @@ impl AppView {
             if pl.boost.is_some() {
                 pl.end_boost();
             } else {
-                pl.toggle_pause();
+                pl.toggle_pause(cx);
             }
             cx.notify();
         });
@@ -2340,7 +2471,7 @@ impl AppView {
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let search_focused = self.search.read(cx).focus_handle(cx).is_focused(window);
         let dialog_focused = self.dialog_input.read(cx).focus_handle(cx).is_focused(window);
-        let k = ev.keystroke.key.as_str();
+        let k = shortcut_key(&ev.keystroke.key);
         let m = &ev.keystroke.modifiers;
         if k == "f5" || (m.control && k == "r" && !search_focused && !dialog_focused) {
             self.refresh(window, cx);
@@ -2403,7 +2534,7 @@ impl AppView {
                 return;
             }
             if cx.global::<UiState>().fullscreen {
-                toggle_fullscreen(window, cx);
+                exit_fullscreen(window, cx);
                 return;
             }
         }
@@ -2501,13 +2632,13 @@ impl AppView {
                 ("space", _) => {
                     // acted on at release (tap) or while held (2x)
                     if held {
-                        pl.start_boost();
+                        pl.start_boost(cx);
                         cx.notify();
                     }
                     true
                 }
                 ("k", false) => {
-                    pl.toggle_pause();
+                    pl.toggle_pause(cx);
                     true
                 }
                 ("i", true) => {
@@ -2523,22 +2654,16 @@ impl AppView {
                     pl.seek_by(10.0);
                     true
                 }
-                ("left", _) => {
-                    pl.seek_by(-step);
+                ("left" | "right", _) => {
+                    let before = pl.time;
+                    pl.seek_by(if k == "left" { -step } else { step });
+                    pl.show_keyboard_feedback(KeyboardFeedback::Seek(pl.time - before), cx);
                     true
                 }
-                ("right", _) => {
-                    pl.seek_by(step);
-                    true
-                }
-                ("up", _) => {
-                    let v = pl.volume;
-                    pl.set_volume(v + 5.0);
-                    true
-                }
-                ("down", _) => {
-                    let v = pl.volume;
-                    pl.set_volume(v - 5.0);
+                ("up" | "down", _) => {
+                    let delta = if k == "up" { 5.0 } else { -5.0 };
+                    pl.set_volume(pl.volume + delta);
+                    pl.show_keyboard_feedback(KeyboardFeedback::Volume(pl.volume), cx);
                     true
                 }
                 ("m", false) => {
@@ -2546,15 +2671,7 @@ impl AppView {
                     true
                 }
                 ("c", false) => {
-                    let next = if pl.caption.is_some() {
-                        None
-                    } else {
-                        let lang = store::settings_snapshot().captions_lang.clone();
-                        pl.streams.as_ref().and_then(|s| {
-                            s.captions.iter().position(|c| c.lang.starts_with(&lang)).or(if s.captions.is_empty() { None } else { Some(0) })
-                        })
-                    };
-                    pl.set_caption(next, cx);
+                    pl.toggle_captions(cx);
                     true
                 }
                 (",", false) if pl.paused => {
@@ -2599,7 +2716,7 @@ impl AppView {
                 (d, false) if d.len() == 1 && d.chars().all(|c| c.is_ascii_digit()) => {
                     let n: f64 = d.parse().unwrap();
                     let dur = pl.duration;
-                    pl.seek_to(dur * n / 10.0);
+                    pl.seek_interactive(dur * n / 10.0);
                     true
                 }
                 ("p", true) => {
@@ -2613,6 +2730,13 @@ impl AppView {
                     pl.set_audio_only(a, cx);
                     true
                 }
+                // aspect ratio: Original, Auto, Zoom to fill, Stretch, 21:9...
+                ("z", false) => {
+                    let next = crate::player::aspect::next_mode(&store::settings_snapshot().aspect_mode);
+                    crate::player::view::set_aspect_mode(next, cx);
+                    crate::ui::toast(cx, tf!("Aspect ratio: {0}", t(crate::player::aspect::label(next))));
+                    true
+                }
                 _ => false,
             };
             cx.notify();
@@ -2623,19 +2747,22 @@ impl AppView {
         }
         match (k, m.shift) {
             ("f", false) => toggle_fullscreen(window, cx),
-            ("t", false) => {
-                cx.global_mut::<UiState>().theater ^= true;
-                cx.notify();
-            }
+            ("'", _) => toggle_windowed_fullscreen(window, cx),
+            ("t", false) => toggle_theater_mode(cx),
             ("i", false) => {
-                if matches!(self.route, Route::Watch { .. }) {
+                if matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
                     if self.history.is_empty() {
                         self.go(Route::Home, window, cx);
                     } else {
                         self.back(window, cx);
                     }
                 } else if let Some(v) = p.read(cx).video.clone() {
-                    self.go(Route::Watch { id: v.id, playlist: None, start: None }, window, cx);
+                    let route = if v.is_short && !store::settings_snapshot().shorts_in_player {
+                        Route::Shorts(Some(v.id))
+                    } else {
+                        Route::Watch { id: v.id, playlist: None, start: None }
+                    };
+                    self.go(route, window, cx);
                 }
             }
             ("n", true) => play_next(window, cx),
@@ -2646,6 +2773,7 @@ impl AppView {
     // ───── chrome ─────
 
     fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        localize_placeholder(&self.search, "Search or paste a YouTube link", window, cx);
         let p = pal(cx);
         let can_back = !self.history.is_empty();
         let suggestions = if self.show_suggestions { self.all_suggestions() } else { Vec::new() };
@@ -2653,7 +2781,7 @@ impl AppView {
         let sel = self.sel_suggestion;
         let preserve_btn = (store::settings_snapshot().home_preserve == "pin").then(|| self.render_preserve_button(cx));
         let maximized = window.is_maximized();
-        div()
+        let bar = div()
             .id("topbar")
             .flex()
             .flex_none()
@@ -2692,9 +2820,8 @@ impl AppView {
                             .child(crate::ui::logo(px(28.))),
                     ),
             )
-            // only the empty gaps move the window: gpui reports the first matching control
-            // area, so a drag area around the buttons would swallow their clicks
-            .child(drag_gap("drag-l"))
+            // Native caption hit testing must leave the controls clickable.
+            .child(drag_gap("drag-l").flex_1().min_w(px(24.)))
             .child(
                 div()
                     .relative()
@@ -2743,6 +2870,7 @@ impl AppView {
                             deferred(
                                 div()
                                     .id("suggestions")
+                                    .when(cfg!(target_os = "linux"), |d| d.occlude())
                                     .absolute()
                                     .top(px(44.))
                                     .left_0()
@@ -2775,7 +2903,7 @@ impl AppView {
                                                         .id(SharedString::from(format!("sugx-{i}")))
                                                         .text_xs()
                                                         .text_color(p.link)
-                                                        .child("Remove")
+                                                        .child(t("Remove"))
                                                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                                                             cx.stop_propagation();
                                                             store::search_history_remove(&s3);
@@ -2793,7 +2921,7 @@ impl AppView {
                         )
                     }),
             )
-            .child(drag_gap("drag-r"))
+            .child(drag_gap("drag-r").flex_1().min_w(px(24.)))
             .child(
                 div()
                     .flex()
@@ -2803,9 +2931,12 @@ impl AppView {
                     .child(self.render_dl_button(cx))
                     .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
                     .child(self.account_button(cx))
-                    .child(div().id("drag-c").w_3().h(px(56.)).window_control_area(WindowControlArea::Drag))
+                    .child(drag_gap("drag-c").w_3())
                     .child(window_controls(maximized, cx)),
-            )
+            );
+        #[cfg(target_os = "linux")]
+        let bar = super::topbar_drag::wrap(bar, self.search.clone(), window, cx);
+        bar
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -2825,7 +2956,8 @@ impl AppView {
                     .items_center()
                     .gap_1p5()
                     .py_3p5()
-                    .w(px(64.))
+                    .w_full()
+                    .px_1()
                     .rounded_xl()
                     .cursor_pointer()
                     .when(active, |d| d.bg(p.chip))
@@ -2840,7 +2972,7 @@ impl AppView {
                 .flex_col()
                 .flex_none()
                 .gap_1()
-                .w(px(72.))
+                .w(px(COLLAPSED_SIDEBAR_WIDTH))
                 .px_1()
                 .pt_1()
                 .child(rail("r-home", "house", "Home", Route::Home, route == Route::Home, cx))
@@ -2894,7 +3026,7 @@ impl AppView {
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(p.text)
-                .child(title.to_string())
+                .child(t(title).to_string())
         };
         let sep = || div().flex_none().mx_3().my_3().h(px(1.)).bg(p.border);
 
@@ -3115,6 +3247,7 @@ impl AppView {
             return None;
         }
         let id = video.id.clone();
+        let is_short = video.is_short;
         let (right, bottom, w) = self.mini_geom;
         let h = w * 9.0 / 16.0;
         let start = |resize: bool| {
@@ -3152,7 +3285,12 @@ impl AppView {
                             if std::mem::take(&mut this.mini_dragged) {
                                 return;
                             }
-                            this.go(Route::Watch { id: id.clone(), playlist: None, start: None }, window, cx)
+                            let route = if is_short && !store::settings_snapshot().shorts_in_player {
+                                Route::Shorts(Some(id.clone()))
+                            } else {
+                                Route::Watch { id: id.clone(), playlist: None, start: None }
+                            };
+                            this.go(route, window, cx)
                         }))
                         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).truncate().child(video.title.clone()))
                         .child(div().text_xs().text_color(p.text2).truncate().child(video.channel_name.clone())),
@@ -3218,7 +3356,33 @@ impl AppView {
 
     fn render_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = pal(cx);
-        let (pos, items) = cx.global::<OpenMenu>().0.clone()?;
+        let (pos, content) = cx.global::<OpenMenu>().0.clone()?;
+        let body = match content {
+            MenuContent::View(view) => view.into_any_element(),
+            MenuContent::Items(items) => div()
+                .children(items.into_iter().enumerate().map(|(i, it)| {
+                    let act = it.action.clone();
+                    div()
+                        .id(SharedString::from(format!("mi-{i}")))
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .px_4()
+                        .h_9()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(p.text)
+                        .hover(move |s| s.bg(p.hover))
+                        .child(icon(it.icon).size_5().text_color(p.text))
+                        .child(it.label.clone())
+                        .on_click(move |_, window, cx| {
+                            cx.set_global(OpenMenu(None));
+                            act(window, cx);
+                            cx.refresh_windows();
+                        })
+                }))
+                .into_any_element(),
+        };
         Some(
             deferred(
                 anchored().position(pos).snap_to_window_with_margin(px(8.)).child(
@@ -3236,27 +3400,7 @@ impl AppView {
                             cx.set_global(OpenMenu(None));
                             cx.refresh_windows();
                         })
-                        .children(items.into_iter().enumerate().map(|(i, it)| {
-                            let act = it.action.clone();
-                            div()
-                                .id(SharedString::from(format!("mi-{i}")))
-                                .flex()
-                                .items_center()
-                                .gap_4()
-                                .px_4()
-                                .h_9()
-                                .cursor_pointer()
-                                .text_sm()
-                                .text_color(p.text)
-                                .hover(move |s| s.bg(p.hover))
-                                .child(icon(it.icon).size_5().text_color(p.text))
-                                .child(it.label.clone())
-                                .on_click(move |_, window, cx| {
-                                    cx.set_global(OpenMenu(None));
-                                    act(window, cx);
-                                    cx.refresh_windows();
-                                })
-                        })),
+                        .child(body),
                 ),
             )
             .with_priority(3)
@@ -3272,7 +3416,7 @@ impl AppView {
             Status::Available(r) => (r, None),
             Status::Downloading(r, f) => (r, Some(f)),
             _ => {
-                return div().p_5().text_sm().text_color(p.text2).child("No update available").into_any_element();
+                return div().p_5().text_sm().text_color(p.text2).child(t("No update available")).into_any_element();
             }
         };
         // release notes are Markdown; long ones are cut at a line break
@@ -3286,9 +3430,9 @@ impl AppView {
         let version = rel.name.trim_start_matches("Stream Tube").trim().trim_start_matches('v').to_string();
         let accent = crate::ui::app_icon::icon_accent(store::settings_snapshot().accent);
         let [c0, _, c2] = crate::ui::app_icon::accent_stops(accent);
-        let mut meta = vec![format!("You have {}", crate::updater::current_version())];
+        let mut meta = vec![tf!("You have {0}", crate::updater::current_version())];
         if rel.prerelease {
-            meta.push("Pre-release".into());
+            meta.push(t("Pre-release").into());
         }
         if let Some(sz) = size {
             meta.push(sz);
@@ -3339,14 +3483,14 @@ impl AppView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(white())
                     .child(icon("sparkles").size_3p5().text_color(white()))
-                    .child("New version"),
+                    .child(t("New version")),
             )
             .child(div().text_3xl().font_weight(FontWeight::BOLD).text_color(white()).child(format!("Stream Tube {version}")))
-            .child(div().text_sm().text_color(hsla(0., 0., 1., 0.85)).child(meta.join("  ·  ")));
+            .child(div().text_sm().text_color(hsla(0., 0., 1., 0.85)).child(meta.join(", ")));
 
         let mut body = div().flex().flex_col().gap_4().p_6();
         if !notes.trim().is_empty() {
-            body = body.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child("WHAT'S NEW")).child(
+            body = body.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(t("WHAT'S NEW"))).child(
                 div()
                     .id("upd-notes")
                     .when(notes.len() > 280, |d| d.h(px(230.)))
@@ -3372,7 +3516,7 @@ impl AppView {
                             .flex()
                             .justify_between()
                             .text_sm()
-                            .child(div().text_color(p.text).font_weight(FontWeight::MEDIUM).child(if f >= 0.999 { "Installing…" } else { "Downloading…" }))
+                            .child(div().text_color(p.text).font_weight(FontWeight::MEDIUM).child(if f >= 0.999 { t("Installing…") } else { t("Downloading…") }))
                             .child(div().text_color(p.text2).child(format!("{:.0}%", f * 100.0))),
                     )
                     .child(
@@ -3399,7 +3543,7 @@ impl AppView {
                                 ),
                         ),
                     )
-                    .child(div().text_xs().text_color(p.text2).child("Stream Tube restarts by itself when it's done.")),
+                    .child(div().text_xs().text_color(p.text2).child(t("Stream Tube restarts by itself when it's done."))),
             );
             return div().flex().flex_col().child(hero).child(body).into_any_element();
         }
@@ -3415,12 +3559,12 @@ impl AppView {
                         .gap_4()
                         .text_sm()
                         .text_color(p.text2)
-                        .child(div().id("upd-skip").cursor_pointer().hover(|s| s.text_color(p.text)).child("Skip this version").on_click(cx.listener(|this, _, _, cx| {
+                        .child(div().id("upd-skip").cursor_pointer().hover(|s| s.text_color(p.text)).child(t("Skip this version")).on_click(cx.listener(|this, _, _, cx| {
                             crate::updater::skip(cx);
                             this.dialog = None;
                             cx.notify();
                         })))
-                        .child(div().id("upd-later").cursor_pointer().hover(|s| s.text_color(p.text)).child("Later").on_click(cx.listener(|this, _, _, cx| {
+                        .child(div().id("upd-later").cursor_pointer().hover(|s| s.text_color(p.text)).child(t("Later")).on_click(cx.listener(|this, _, _, cx| {
                             this.dialog = None;
                             cx.notify();
                         }))),
@@ -3442,7 +3586,7 @@ impl AppView {
                         .text_color(white())
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(icon(if has_installer { "download" } else { "external-link" }).size_4().text_color(white()))
-                        .child(if has_installer { "Update now" } else { "Download" })
+                        .child(if has_installer { t("Update now") } else { t("Download") })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !has_installer {
                                 this.dialog = None;
@@ -3635,17 +3779,19 @@ impl AppView {
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover))
                             .child(icon("plus").text_color(p.text))
-                            .child(div().text_sm().text_color(p.text).child("Create new playlist"))
+                            .child(div().text_sm().text_color(p.text).child(t("Create new playlist")))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let v3 = v.clone();
                                 this.dialog = None;
                                 cx.notify();
                                 let v4 = v3.clone();
-                                cx.defer_in(window, move |_, window, cx| {
+                                // window.defer, not defer_in: prompt_text updates this same
+                                // AppView, which defer_in would still be holding (a crash)
+                                window.defer(cx, move |window, cx| {
                                     prompt_text("New playlist", "Playlist name", window, cx, move |name, _, cx| {
                                         let id = store::playlist_create(&name);
                                         store::playlist_add(id, &v4);
-                                        toast(cx, format!("Saved to {name}"));
+                                        toast(cx, tf!("Saved to playlist “{0}”", name));
                                     });
                                 });
                             })),
@@ -3656,7 +3802,7 @@ impl AppView {
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(title.clone()))
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t(title).to_string()))
                 .child(div().border_b_1().border_color(p.text2).pb_1().child(Input::new(&self.dialog_input).appearance(false)))
                 .child(
                     div().flex().justify_end().gap_2().child(pill("dlg-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
@@ -3680,8 +3826,8 @@ impl AppView {
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(title.clone()))
-                .child(div().text_sm().text_color(p.text2).child(body.clone()))
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(t(title).to_string()))
+                .child(div().text_sm().text_color(p.text2).child(t(body).to_string()))
                 .child(
                     div().flex().justify_end().gap_2().child(pill("dlg-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
                         this.dialog = None;
@@ -3877,22 +4023,12 @@ impl Render for AppView {
         if (f32::from(window.rem_size()) - 16.0 * scale).abs() > 0.01 {
             window.set_rem_size(px(16.0 * scale));
         }
-        let vp = window.viewport_size();
-        let ui = *cx.global::<UiState>();
         let is_watch = matches!(self.route, Route::Watch { .. });
-        let sidebar_w = if is_watch {
-            0.0
-        } else if ui.sidebar_open {
-            232.0
-        } else {
-            72.0
-        };
-        {
-            let u = cx.global_mut::<UiState>();
-            u.viewport = vp;
-            u.content_width = vp.width - px(sidebar_w) - px(48.);
-        }
-        let fullscreen = ui.fullscreen && is_watch;
+        let is_shorts = matches!(self.route, Route::Shorts(_));
+        let ui = cx.global_mut::<UiState>();
+        ui.viewport = window.viewport_size();
+        ui.shorts = is_shorts;
+        let fullscreen = ui.fullscreen && (is_watch || is_shorts);
         let mut root = div()
             .image_cache(self.images.clone())
             .id("app-root")
@@ -3915,10 +4051,32 @@ impl Render for AppView {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|this, _, window, cx| this.forward(window, cx)),
             );
+        if !is_shorts {
+            crate::player::shorts_preload::clear();
+        }
         let has_slot = matches!(self.route, Route::Watch { .. } | Route::Shorts(_));
+        let page_id = self.page.entity_id();
         let page_area = div()
             .relative()
             .overflow_hidden()
+            // Measure inside the page's px_6 gutters before the cached page lays out its cards.
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let width = bounds.size.width;
+                        if cx.global::<UiState>().content_width != width {
+                            cx.global_mut::<UiState>().content_width = width;
+                            cx.notify(page_id);
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .left_6()
+                .right_6()
+                .top_0()
+                .h_0(),
+            )
             .child(
                 // each newly shown page fades in; the animation stops after 160 ms
                 div()
@@ -3930,14 +4088,14 @@ impl Render for AppView {
                         |d, t| d.opacity(0.35 + 0.65 * t),
                     ),
             )
-            .when(has_slot, |d| d.child(crate::ui::slot::SlotFollower::new(cx, self.main_view.clone().into())))
+            .when(has_slot, |d| d.child(crate::ui::pip::main_surface(&self.main_view, cx)))
             // only over a thumbnail drawn on this page (the slot is cleared when a
             // preview stops or moves to another video)
             .when(
                 crate::player::preview::showing(cx).is_some() && cx.global::<crate::player::preview::PreviewSlot>().0.get().is_some(),
                 |d| {
                     let slot = cx.global::<crate::player::preview::PreviewSlot>().0.clone();
-                    d.child(crate::ui::slot::SlotFollower::with_slot(slot, self.preview_view.clone().into()))
+                    d.child(crate::ui::slot::SlotFollower::with_slot(slot, AnyView::from(self.preview_view.clone())))
                 },
             );
         if fullscreen {
@@ -3978,7 +4136,7 @@ impl Render for AppView {
 
 /// Maximizes, or restores a maximized window.
 pub fn toggle_maximize(window: &mut Window) {
-    if !window.is_maximized() {
+    if cfg!(target_os = "linux") || !window.is_maximized() {
         window.zoom_window();
         return;
     }
@@ -4059,8 +4217,19 @@ pub fn show_window(window: &mut Window) {
 }
 
 /// Empty top-bar space that moves the window (with snap and double-click maximize).
-fn drag_gap(id: &'static str) -> impl IntoElement {
-    div().id(id).flex_1().min_w(px(24.)).h(px(56.)).window_control_area(WindowControlArea::Drag)
+fn drag_gap(id: &'static str) -> Stateful<Div> {
+    let gap = div()
+        .id(id)
+        .h(px(56.))
+        .window_control_area(WindowControlArea::Drag);
+    #[cfg(target_os = "linux")]
+    let gap = gap.on_mouse_down(MouseButton::Left, |event, window, cx| {
+        if event.click_count == 2 {
+            toggle_maximize(window);
+            cx.stop_propagation();
+        }
+    });
+    gap
 }
 
 /// Minimize / maximize / close, drawn in the top bar. The OS handles the clicks
@@ -4129,21 +4298,58 @@ fn build_page(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
     }
 }
 
-/// Shows a file selected in the system file manager.
+/// Shows a download in the system file manager.
 pub fn reveal_in_folder(path: &str, cx: &mut App) {
-    if !std::path::Path::new(path).exists() {
-        toast(cx, "File not found (moved or deleted)");
+    let path = std::path::Path::new(path);
+    if !path.exists() {
+        toast(cx, t("File not found (moved or deleted)"));
+        return;
+    }
+    if path.is_dir() {
+        let _ = open::that(path);
         return;
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
+        // SHOpenFolderAndSelectItems can block and run its own message loop (it shows
+        // an error dialog when Explorer can't open the folder). That must not happen on
+        // GPUI's thread, so it runs on its own thread with its own COM apartment.
+        let path = path.to_path_buf();
+        let _ = std::thread::Builder::new().name("reveal-in-folder".into()).spawn(move || {
+            if !select_in_explorer(&path) {
+                if let Some(folder) = path.parent() {
+                    let _ = open::that(folder);
+                }
+            }
+        });
     }
     #[cfg(not(windows))]
-    {
-        if let Some(d) = std::path::Path::new(path).parent() {
-            let _ = open::that(d);
+    if let Some(folder) = path.parent() {
+        let _ = open::that(folder);
+    }
+}
+
+#[cfg(windows)]
+fn select_in_explorer(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems};
+    use windows::core::PCWSTR;
+
+    let Ok(path) = std::path::absolute(path) else { return false };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let item = ILCreateFromPathW(PCWSTR(wide.as_ptr()));
+        let ok = !item.is_null() && {
+            let result = SHOpenFolderAndSelectItems(item, None, 0);
+            ILFree(Some(item));
+            result.is_ok()
+        };
+        if com {
+            CoUninitialize();
         }
+        ok
     }
 }
 

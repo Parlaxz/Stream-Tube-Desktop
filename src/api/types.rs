@@ -8,6 +8,7 @@ pub struct VideoItem {
     pub channel_id: Option<String>,
     pub channel_avatar: Option<String>,
     pub thumbnail: String,
+    pub compact_thumbnail: Option<String>,
     pub duration_text: Option<String>,
     pub duration_secs: Option<u64>,
     pub views_text: Option<String>,
@@ -18,6 +19,9 @@ pub struct VideoItem {
     pub is_live: bool,
     pub is_short: bool,
     pub is_upcoming: bool,
+    /// Set when the card stands for a show (podcast, series): the playlist of its
+    /// episodes, which is what opening the card should show.
+    pub playlist_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -79,6 +83,7 @@ pub struct WatchInfo {
     pub date_text: String,
     pub likes_text: Option<String>,
     pub description: String,
+    pub description_links: Vec<DescriptionLink>,
     pub channel: ChannelItem,
     pub chapters: Vec<Chapter>,
     /// "Most replayed" graph: (start s, duration s, intensity 0..1)
@@ -94,6 +99,12 @@ pub struct WatchInfo {
     pub live_chat: Option<(String, String)>,
     /// When watching in a playlist context.
     pub playlist: Option<WatchPlaylist>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DescriptionLink {
+    pub range: std::ops::Range<usize>,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -136,6 +147,9 @@ pub struct CommentPage {
 #[derive(Clone, Debug, Default)]
 pub struct ChannelTab {
     pub title: String,
+    /// what the tab is, whatever language its title is in: the last part of its
+    /// URL ("featured", "videos", "shorts", "streams", "playlists", …)
+    pub kind: String,
     pub params: Option<String>,
     pub selected: bool,
 }
@@ -176,6 +190,7 @@ pub struct StreamFormat {
 
 #[derive(Clone, Debug, Default)]
 pub struct CaptionTrack {
+    pub json3_url: Option<String>,
     pub lang: String,
     pub name: String,
     pub url: String,
@@ -229,6 +244,10 @@ pub struct StreamInfo {
     pub audio: Vec<StreamFormat>,
     pub muxed: Vec<StreamFormat>,
     pub captions: Vec<CaptionTrack>,
+    /// Original audio language code detected from stream/HLS/yt-dlp metadata, if available.
+    pub original_language: Option<String>,
+    /// Default caption track index for the original audio track, if reported by YouTube.
+    pub default_caption_index: Option<usize>,
     pub storyboard: Option<Storyboard>,
     pub source: &'static str,
     /// Play `hls_url` (through the proxy); `video` then only lists the HLS

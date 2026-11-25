@@ -4,7 +4,9 @@
 use anyhow::{Result, anyhow};
 use libloading::Library;
 use parking_lot::{Condvar, Mutex};
+use std::error::Error;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -40,7 +42,71 @@ struct mpv_event_end_file {
 
 const MPV_FORMAT_STRING: c_int = 1;
 const MPV_FORMAT_FLAG: c_int = 3;
+const MPV_FORMAT_INT64: c_int = 4;
 const MPV_FORMAT_DOUBLE: c_int = 5;
+const MPV_FORMAT_NODE: c_int = 6;
+const MPV_FORMAT_NODE_ARRAY: c_int = 7;
+const MPV_FORMAT_NODE_MAP: c_int = 8;
+
+#[repr(C)]
+struct Node {
+    value: NodeValue,
+    format: c_int,
+}
+
+#[repr(C)]
+union NodeValue {
+    number: f64,
+    integer: i64,
+    list: *const NodeList,
+}
+
+#[repr(C)]
+struct NodeList {
+    num: c_int,
+    values: *const Node,
+    keys: *const *const c_char,
+}
+
+impl Node {
+    // All nodes and strings in an observed property belong to the current
+    // mpv event and are consumed before the next call to mpv_wait_event.
+    unsafe fn entries(&self, format: c_int) -> Option<(&NodeList, &[Node])> {
+        if self.format != format { return None }
+        let list = unsafe { self.value.list.as_ref()? };
+        let values = if list.num <= 0 { &[] } else {
+            unsafe { std::slice::from_raw_parts(list.values, list.num as usize) }
+        };
+        Some((list, values))
+    }
+
+    unsafe fn field(&self, key: &[u8]) -> Option<&Node> {
+        let (list, values) = unsafe { self.entries(MPV_FORMAT_NODE_MAP)? };
+        values.iter().enumerate().find_map(|(i, value)| {
+            let name = unsafe { CStr::from_ptr(*list.keys.add(i)) };
+            (name.to_bytes() == key).then_some(value)
+        })
+    }
+
+    fn number(&self) -> Option<f64> {
+        (self.format == MPV_FORMAT_DOUBLE).then(|| unsafe { self.value.number })
+    }
+
+    unsafe fn cache_state(&self) -> Option<PropValue> {
+        let ranges = unsafe { self.field(b"seekable-ranges")? };
+        let (_, ranges) = unsafe { ranges.entries(MPV_FORMAT_NODE_ARRAY)? };
+        let ranges = ranges.iter().filter_map(|entry| {
+            let start = unsafe { entry.field(b"start")? }.number()?;
+            let end = unsafe { entry.field(b"end")? }.number()?;
+            (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
+        }).collect();
+        let disk_bytes = unsafe { self.field(b"file-cache-bytes") }
+            .filter(|n| n.format == MPV_FORMAT_INT64)
+            .and_then(|n| u64::try_from(unsafe { n.value.integer }).ok())
+            .unwrap_or(0);
+        Some(PropValue::Cache { ranges, disk_bytes })
+    }
+}
 
 const EV_SHUTDOWN: c_int = 1;
 const EV_END_FILE: c_int = 7;
@@ -49,12 +115,23 @@ const EV_PROPERTY_CHANGE: c_int = 22;
 const EV_PLAYBACK_RESTART: c_int = 21;
 
 const RP_API_TYPE: c_int = 1;
+const RP_NEXT_FRAME_INFO: c_int = 11;
 const RP_BLOCK_FOR_TARGET_TIME: c_int = 12;
 const RP_SW_SIZE: c_int = 17;
 const RP_SW_FORMAT: c_int = 18;
 const RP_SW_STRIDE: c_int = 19;
 const RP_SW_POINTER: c_int = 20;
 const RENDER_UPDATE_FRAME: u64 = 1;
+const FRAME_PRESENT: u64 = 1;
+const FRAME_REDRAW: u64 = 2;
+const FRAME_REPEAT: u64 = 4;
+
+#[repr(C)]
+#[derive(Default)]
+struct RenderFrameInfo {
+    flags: u64,
+    target_time: i64,
+}
 
 struct Fns {
     create: unsafe extern "C" fn() -> *mut mpv_handle,
@@ -75,23 +152,38 @@ struct Fns {
     rc_set_update_callback:
         unsafe extern "C" fn(*mut mpv_render_context, Option<unsafe extern "C" fn(*mut c_void)>, *mut c_void),
     rc_update: unsafe extern "C" fn(*mut mpv_render_context) -> u64,
+    rc_get_info: unsafe extern "C" fn(*mut mpv_render_context, mpv_render_param) -> c_int,
     rc_render: unsafe extern "C" fn(*mut mpv_render_context, *mut mpv_render_param) -> c_int,
     rc_free: unsafe extern "C" fn(*mut mpv_render_context),
 }
 
+#[cfg(windows)]
+const LIBRARY_NAMES: &[&str] = &["libmpv-2.dll", "mpv-2.dll"];
+#[cfg(target_os = "macos")]
+const LIBRARY_NAMES: &[&str] = &["libmpv.2.dylib"];
+#[cfg(not(any(windows, target_os = "macos")))]
+const LIBRARY_NAMES: &[&str] = &["libmpv.so.2", "libmpv.so.1", "libmpv.so"];
+
+#[cfg(windows)]
+pub(super) const MISSING_WINDOWS_MPV: &str =
+    "libmpv-2.dll is missing. Extract the entire Windows ZIP before opening streamtube.exe, or use the Windows installer.";
+
 fn lib() -> Result<&'static (Library, Fns)> {
     static LIB: std::sync::OnceLock<Result<(Library, Fns), String>> = std::sync::OnceLock::new();
-    LIB.get_or_init(|| unsafe {
+    LIB.get_or_init(|| {
         #[cfg(windows)]
-        preload_vulkan_loader();
-        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        unsafe {
+            preload_vulkan_loader();
+        }
+        let mut candidates = Vec::new();
+        #[cfg(any(windows, target_os = "linux"))]
         if let Ok(exe) = std::env::current_exe() {
             if let Some(d) = exe.parent() {
-                candidates.push(d.join("libmpv-2.dll"));
-                candidates.push(d.join("mpv-2.dll"));
+                #[cfg(windows)]
+                candidates.extend(LIBRARY_NAMES.iter().map(|name| d.join(name)));
                 // the AppImage carries its own libmpv in usr/lib, next to usr/bin
                 #[cfg(target_os = "linux")]
-                for name in ["libmpv.so.2", "libmpv.so.1"] {
+                for &name in &LIBRARY_NAMES[..2] {
                     let p = d.join("../lib").join(name);
                     if p.is_file() {
                         candidates.push(p);
@@ -100,14 +192,16 @@ fn lib() -> Result<&'static (Library, Fns)> {
             }
         }
         #[cfg(windows)]
-        candidates.push(std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/third_party/mpv/libmpv-2.dll")));
-        candidates.push("libmpv-2.dll".into());
-        candidates.push("mpv-2.dll".into());
-        candidates.push("libmpv.so.2".into());
-        // older distributions (Ubuntu 22.04, Debian 11) ship the same API as .so.1
-        candidates.push("libmpv.so.1".into());
-        candidates.push("libmpv.so".into());
-        candidates.push("libmpv.2.dylib".into());
+        candidates.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/third_party/mpv/libmpv-2.dll")));
+        candidates.extend(LIBRARY_NAMES.iter().map(PathBuf::from));
+        open_library(candidates)
+    })
+    .as_ref()
+    .map_err(|e| anyhow!("{e}"))
+}
+
+fn open_library(candidates: impl IntoIterator<Item = PathBuf>) -> Result<(Library, Fns), String> {
+    unsafe {
         let mut last_err = String::from("libmpv not found");
         // the error from a copy that is there but won't load says more than
         // "not found" from the names tried after it
@@ -138,23 +232,50 @@ fn lib() -> Result<&'static (Library, Fns)> {
                         rc_create: sym!("mpv_render_context_create"),
                         rc_set_update_callback: sym!("mpv_render_context_set_update_callback"),
                         rc_update: sym!("mpv_render_context_update"),
+                        rc_get_info: sym!("mpv_render_context_get_info"),
                         rc_render: sym!("mpv_render_context_render"),
                         rc_free: sym!("mpv_render_context_free"),
                     };
                     return Ok((l, fns));
                 }
                 Err(e) => {
-                    last_err = format!("{}: {e}", c.display());
+                    last_err = match e.source() {
+                        Some(source) => format!("{} ({e}, {source})", c.display()),
+                        None => format!("{} ({e})", c.display()),
+                    };
                     if first_real_err.is_none() && c.is_absolute() && c.is_file() {
                         first_real_err = Some(last_err.clone());
                     }
                 }
             }
         }
+        #[cfg(windows)]
+        if first_real_err.is_none() {
+            return Err(MISSING_WINDOWS_MPV.into());
+        }
         Err(first_real_err.unwrap_or(last_err))
-    })
-    .as_ref()
-    .map_err(|e| anyhow!("{e}"))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_loader_tests {
+    use super::{MISSING_WINDOWS_MPV, open_library};
+
+    #[test]
+    fn missing_dll_explains_how_to_open_the_portable_app() {
+        let path = crate::store::data_dir().join("missing-test-engine").join("libmpv-2.dll");
+        let error = open_library([path]).err().expect("missing playback library");
+        assert_eq!(error, MISSING_WINDOWS_MPV);
+    }
+
+    #[test]
+    fn existing_dll_keeps_the_windows_loader_error() {
+        let path = crate::store::data_dir().join("invalid-test-engine.dll");
+        std::fs::write(&path, b"invalid DLL").unwrap();
+        let error = open_library([path.clone()]).err().expect("invalid playback library");
+        assert!(error.contains(&*path.to_string_lossy()));
+        assert!(error.contains("193"), "{error}");
+    }
 }
 
 /// libmpv-2.dll links against vulkan-1.dll, which Windows only has when the GPU
@@ -208,6 +329,7 @@ pub enum PropValue {
     Double(f64),
     Flag(bool),
     Str(String),
+    Cache { ranges: Vec<(f64, f64)>, disk_bytes: u64 },
 }
 
 const OBSERVED: &[(&str, c_int)] = &[
@@ -218,6 +340,7 @@ const OBSERVED: &[(&str, c_int)] = &[
     ("paused-for-cache", MPV_FORMAT_FLAG),
     ("seeking", MPV_FORMAT_FLAG),
     ("demuxer-cache-time", MPV_FORMAT_DOUBLE),
+    ("demuxer-cache-state", MPV_FORMAT_NODE),
     ("speed", MPV_FORMAT_DOUBLE),
     ("volume", MPV_FORMAT_DOUBLE),
     ("mute", MPV_FORMAT_FLAG),
@@ -225,6 +348,27 @@ const OBSERVED: &[(&str, c_int)] = &[
     ("dheight", MPV_FORMAT_DOUBLE),
     ("core-idle", MPV_FORMAT_FLAG),
 ];
+
+#[cfg(windows)]
+fn set_playback_awake(playing: bool, video: bool) {
+    const ES_CONTINUOUS: u32 = 0x8000_0000;
+    const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+    const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetThreadExecutionState(flags: u32) -> u32;
+    }
+
+    let mut flags = ES_CONTINUOUS;
+    if playing {
+        flags |= ES_SYSTEM_REQUIRED;
+        if video {
+            flags |= ES_DISPLAY_REQUIRED;
+        }
+    }
+    unsafe { SetThreadExecutionState(flags) };
+}
 
 struct Handle(*mut mpv_handle);
 unsafe impl Send for Handle {}
@@ -238,7 +382,7 @@ pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
-    pub serial: u64,
+    pub picture_serial: u64,
 }
 
 struct RenderShared {
@@ -246,7 +390,7 @@ struct RenderShared {
     cv: Condvar,
     target: Mutex<(u32, u32)>,
     frame: Mutex<Option<VideoFrame>>,
-    serial: AtomicU64,
+    presented_frames: AtomicU64,
     stop: AtomicBool,
     force: AtomicBool,
 }
@@ -296,7 +440,7 @@ impl Mpv {
                 cv: Condvar::new(),
                 target: Mutex::new((640, 360)),
                 frame: Mutex::new(None),
-                serial: AtomicU64::new(0),
+                presented_frames: AtomicU64::new(0),
                 stop: AtomicBool::new(false),
                 force: AtomicBool::new(false),
             });
@@ -322,6 +466,8 @@ impl Mpv {
             let ev_cb = events.clone();
             let t1 = std::thread::Builder::new().name("mpv-events".into()).spawn(move || {
                 let (_, f) = lib().unwrap();
+                #[cfg(windows)]
+                let (mut playing, mut has_video) = (false, false);
                 loop {
                     let e = (f.wait_event)(ev_handle.0, -1.0);
                     if e.is_null() {
@@ -347,17 +493,34 @@ impl Mpv {
                         EV_PROPERTY_CHANGE => {
                             let p = &*(e.data as *const mpv_event_property);
                             let idx = e.reply_userdata as usize;
-                            if idx < OBSERVED.len() && !p.data.is_null() {
+                            if idx < OBSERVED.len() {
                                 let name = OBSERVED[idx].0;
-                                let val = match p.format {
-                                    MPV_FORMAT_DOUBLE => Some(PropValue::Double(*(p.data as *const f64))),
-                                    MPV_FORMAT_FLAG => Some(PropValue::Flag(*(p.data as *const c_int) != 0)),
-                                    MPV_FORMAT_STRING => {
-                                        let s = *(p.data as *const *const c_char);
-                                        (!s.is_null()).then(|| PropValue::Str(CStr::from_ptr(s).to_string_lossy().into_owned()))
+                                let val = if p.data.is_null() {
+                                    None
+                                } else {
+                                    match p.format {
+                                        MPV_FORMAT_DOUBLE => Some(PropValue::Double(*(p.data as *const f64))),
+                                        MPV_FORMAT_FLAG => Some(PropValue::Flag(*(p.data as *const c_int) != 0)),
+                                        MPV_FORMAT_NODE => (&*p.data.cast::<Node>()).cache_state(),
+                                        MPV_FORMAT_STRING => {
+                                            let s = *(p.data as *const *const c_char);
+                                            (!s.is_null()).then(|| PropValue::Str(CStr::from_ptr(s).to_string_lossy().into_owned()))
+                                        }
+                                        _ => None,
                                     }
-                                    _ => None,
                                 };
+                                #[cfg(windows)]
+                                match name {
+                                    "core-idle" => {
+                                        playing = matches!(val.as_ref(), Some(PropValue::Flag(false)));
+                                        set_playback_awake(playing, has_video);
+                                    }
+                                    "dwidth" => {
+                                        has_video = matches!(val.as_ref(), Some(PropValue::Double(width)) if *width > 0.0);
+                                        set_playback_awake(playing, has_video);
+                                    }
+                                    _ => {}
+                                }
                                 if let Some(v) = val {
                                     ev_cb(MpvEvent::Prop(name, v));
                                 }
@@ -366,6 +529,8 @@ impl Mpv {
                         _ => {}
                     }
                 }
+                #[cfg(windows)]
+                set_playback_awake(false, false);
             })?;
 
             // render thread
@@ -419,6 +584,9 @@ impl Mpv {
                         mpv_render_param { kind: 0, data: std::ptr::null_mut() },
                     ];
                     let t0 = std::time::Instant::now();
+                    let mut info = RenderFrameInfo::default();
+                    let param = mpv_render_param { kind: RP_NEXT_FRAME_INFO, data: (&mut info as *mut RenderFrameInfo).cast() };
+                    let info_result = (f.rc_get_info)(rc_ptr.0, param);
                     let rc = (f.rc_render)(rc_ptr.0, params.as_mut_ptr());
                     crate::perf::add(&crate::perf::MPV_RENDER_US, t0.elapsed().as_micros() as u64);
                     crate::perf::add(&crate::perf::MPV_FRAMES, 1);
@@ -429,12 +597,31 @@ impl Mpv {
                     // (the buffer is 64-byte aligned, so reading it as u32 is fine)
                     let src = std::slice::from_raw_parts(buf.as_ptr() as *const u32, bytes / 4);
                     let opaque = u32::from_ne_bytes([0, 0, 0, 0xFF]);
-                    let mut data = vec![0u8; bytes];
-                    for (d, s) in data.chunks_exact_mut(4).zip(src) {
-                        d.copy_from_slice(&(s | opaque).to_ne_bytes());
+                    // a frame the UI never picked up gives its buffer back; otherwise a
+                    // fresh one, written once (not zeroed first: ~8 MB a frame at 1080p)
+                    let mut data = r.frame.lock().take().map(|f| f.data).filter(|d| d.capacity() >= bytes).unwrap_or_default();
+                    data.clear();
+                    data.reserve_exact(bytes);
+                    for (d, s) in data.spare_capacity_mut()[..bytes].chunks_exact_mut(4).zip(src) {
+                        for (o, b) in d.iter_mut().zip((s | opaque).to_ne_bytes()) {
+                            o.write(b);
+                        }
                     }
-                    let serial = r.serial.fetch_add(1, Ordering::Relaxed) + 1;
-                    *r.frame.lock() = Some(VideoFrame { width: w, height: h, data, serial });
+                    // SAFETY: the loop above wrote all `bytes` bytes (bytes is w*h*4, src has w*h pixels)
+                    data.set_len(bytes);
+                    // Resizing the window and redrawing subtitles can both
+                    // repaint the last picture while the decoder is stuck.
+                    let new_picture = if info_result >= 0 {
+                        info.flags & (FRAME_PRESENT | FRAME_REDRAW | FRAME_REPEAT) == FRAME_PRESENT
+                    } else {
+                        flags & RENDER_UPDATE_FRAME != 0
+                    };
+                    let picture_serial = if new_picture {
+                        r.presented_frames.fetch_add(1, Ordering::Relaxed) + 1
+                    } else {
+                        r.presented_frames.load(Ordering::Relaxed)
+                    };
+                    *r.frame.lock() = Some(VideoFrame { width: w, height: h, data, picture_serial });
                     frame_cb(MpvEvent::Frame);
                 }
                 (f.rc_free)(rc_ptr.0);
@@ -461,6 +648,10 @@ impl Mpv {
         let mut w = self.render.wake.lock();
         *w = true;
         self.render.cv.notify_one();
+    }
+
+    pub fn presented_frames(&self) -> u64 {
+        self.render.presented_frames.load(Ordering::Relaxed)
     }
 
     pub fn take_frame(&self) -> Option<VideoFrame> {
