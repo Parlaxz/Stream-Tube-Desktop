@@ -288,6 +288,15 @@ fn watch_route(v: &VideoItem) -> Route {
     Route::Watch { id: v.id.clone(), playlist: None, start: None }
 }
 
+/// Opens a channel link: left click in place, a middle click (or Ctrl+click)
+/// in a new tab. Does nothing when the video has no channel id.
+pub fn open_channel(route: Option<Route>, name: &str, ev: &ClickEvent, window: &mut Window, cx: &mut App) {
+    if let Some(route) = route {
+        cx.stop_propagation();
+        activate(route, Some(name.to_string()), None, ev, window, cx);
+    }
+}
+
 // ───────────────────────── grid card (home / subscriptions / channel) ─────────────────────────
 
 /// Starts resolving a video's streams when the pointer rests on its thumbnail,
@@ -336,14 +345,20 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
                 .gap_3()
                 .w_full()
                 .when(show_avatar, |d| {
-                    let cr = channel_route.clone();
+                    let (cr1, cr2) = (channel_route.clone(), channel_route.clone());
+                    let (n1, n2) = (v.channel_name.clone(), v.channel_name.clone());
                     d.child(
                         div()
                             .id(SharedString::from(format!("va-{}", v.id)))
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                if let Some(r) = cr.clone() {
-                                    navigate(r, window, cx);
+                            .flex_none()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(p.border.opacity(0.0))
+                            .hover(move |s| s.border_color(p.text2))
+                            .on_click(move |ev, window, cx| open_channel(cr1.clone(), &n1, ev, window, cx))
+                            .on_aux_click(move |ev, window, cx| {
+                                if ev.is_middle_click() {
+                                    open_channel(cr2.clone(), &n2, ev, window, cx);
                                 }
                             })
                             .child(avatar(v.channel_avatar.as_deref(), px(36.), &v.channel_name, cx)),
@@ -365,7 +380,8 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
                                 .child(title),
                         )
                         .when(show_channel && !v.channel_name.is_empty(), |d| {
-                            let cr = channel_route.clone();
+                            let (cr1, cr2) = (channel_route.clone(), channel_route.clone());
+                            let (n1, n2) = (v.channel_name.clone(), v.channel_name.clone());
                             d.child(
                                 div()
                                     .id(SharedString::from(format!("vn-{}", v.id)))
@@ -373,10 +389,10 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
                                     .text_color(p.text2)
                                     .hover(move |s| s.text_color(p.text))
                                     .truncate()
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(r) = cr.clone() {
-                                            navigate(r, window, cx);
+                                    .on_click(move |ev, window, cx| open_channel(cr1.clone(), &n1, ev, window, cx))
+                                    .on_aux_click(move |ev, window, cx| {
+                                        if ev.is_middle_click() {
+                                            open_channel(cr2.clone(), &n2, ev, window, cx);
                                         }
                                     })
                                     .child(v.channel_name.clone()),
@@ -403,6 +419,7 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
     let route_aux = route.clone();
     let channel = v.channel_avatar.clone();
     let channel_aux = channel.clone();
+    let meta = meta_line(v);
     let h = width * (16. / 9.);
     div()
         .id(SharedString::from(format!("sc-{}", v.id)))
@@ -425,7 +442,7 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
                         .flex_1()
                         .min_w_0()
                         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(title))
-                        .when_some(v.views_text.clone(), |d, vt| d.child(div().text_xs().text_color(p.text2).child(vt))),
+                        .when(!meta.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(meta))),
                 )
                 .child(more_button(SharedString::from(format!("sm-{}", v.id)), v, cx)),
         )
@@ -471,7 +488,8 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
                 )
                 .child(div().text_xs().text_color(p.text2).child(meta))
                 .when(!v.channel_name.is_empty(), |d| {
-                    let cr = channel_route.clone();
+                    let (cr1, cr2) = (channel_route.clone(), channel_route.clone());
+                    let (n1, n2) = (v.channel_name.clone(), v.channel_name.clone());
                     d.child(
                         div()
                             .id(SharedString::from(format!("vrc-{}", v.id)))
@@ -482,13 +500,21 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
                             .text_xs()
                             .text_color(p.text2)
                             .hover(move |s| s.text_color(p.text))
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                if let Some(r) = cr.clone() {
-                                    navigate(r, window, cx);
+                            .on_click(move |ev, window, cx| open_channel(cr1.clone(), &n1, ev, window, cx))
+                            .on_aux_click(move |ev, window, cx| {
+                                if ev.is_middle_click() {
+                                    open_channel(cr2.clone(), &n2, ev, window, cx);
                                 }
                             })
-                            .child(avatar(v.channel_avatar.as_deref(), px(24.), &v.channel_name, cx))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(p.border.opacity(0.0))
+                                    .hover(move |s| s.border_color(p.text2))
+                                    .child(avatar(v.channel_avatar.as_deref(), px(24.), &v.channel_name, cx)),
+                            )
                             .child(v.channel_name.clone()),
                     )
                 })
@@ -509,6 +535,25 @@ pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut
     let title_aux = tab_title.clone();
     let channel = v.channel_avatar.clone();
     let channel_aux = channel.clone();
+    let channel_route = v.channel_id.clone().map(Route::Channel);
+    let cname = v.channel_name.clone();
+    let mut cname_el = div()
+        .id(SharedString::from(format!("crc-{}", v.id)))
+        .text_xs()
+        .text_color(p.text2)
+        .truncate();
+    if let Some(cr) = channel_route {
+        let (cr1, cr2) = (cr.clone(), cr);
+        let (n1, n2) = (cname.clone(), cname.clone());
+        cname_el = cname_el
+            .hover(move |s| s.text_color(p.text))
+            .on_click(move |ev, window, cx| open_channel(Some(cr1.clone()), &n1, ev, window, cx))
+            .on_aux_click(move |ev, window, cx| {
+                if ev.is_middle_click() {
+                    open_channel(Some(cr2.clone()), &n2, ev, window, cx);
+                }
+            });
+    }
     div()
         .id(SharedString::from(format!("cr-{}", v.id)))
         .on_hover(prefetch_hover(&v.id))
@@ -534,7 +579,7 @@ pub fn compact_row(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn(&mut
                 .min_w_0()
                 .gap_1()
                 .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(title))
-                .child(div().text_xs().text_color(p.text2).truncate().child(v.channel_name.clone()))
+                .child(cname_el.child(v.channel_name.clone()))
                 .child(div().text_xs().text_color(p.text2).truncate().child(meta_line(v))),
         )
         .child(more_button(SharedString::from(format!("crm-{}", v.id)), v, cx))

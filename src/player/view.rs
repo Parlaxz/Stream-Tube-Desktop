@@ -208,6 +208,9 @@ impl Render for PlayerView {
         let vol_area = self.area.clone();
         let vol_player = self.player.clone();
         let vol_area_pre = vol_area.clone();
+        // Theater lays the player over the page, so keep its right edge a page
+        // scroll strip: there the wheel scrolls the page instead of the volume.
+        let page_strip = ui.theater && !ui.fullscreen && !mini && !self.pip;
         let volume_layer = canvas(
             move |bounds, _, _| vol_area_pre.set(bounds),
             move |_, _, window, _| {
@@ -219,6 +222,9 @@ impl Render for PlayerView {
                     }
                     let b = area.get();
                     if b.size.width <= px(0.) || !b.contains(&ev.position) {
+                        return;
+                    }
+                    if page_strip && ev.position.x >= b.origin.x + b.size.width * 0.8 {
                         return;
                     }
                     let (has_video, volume) = {
@@ -237,6 +243,7 @@ impl Render for PlayerView {
                     if step == 0.0 {
                         return;
                     }
+                    eprintln!("[VOL] wheel step={step} volume={volume}");
                     cx.stop_propagation();
                     player.update(cx, |p, cx| {
                         p.set_volume(volume + step as f64);
@@ -1083,6 +1090,8 @@ impl PlayerView {
             .child(speed_btn("c-spd-up", "plus", st.speed_up_step.max(0.01)));
         let vol_icon = if muted || volume <= 0.0 { "volume-x" } else if volume < 50.0 { "volume-1" } else { "volume-2" };
         let vol_frac = if muted { 0.0 } else { (volume / 100.0).min(1.0) as f32 };
+        let vol_level = if muted { 0 } else { volume.round() as i64 };
+        let show_vol_level = !narrow && !st.hide_volume_level;
         let time_text = if is_live {
             "● LIVE".to_string()
         } else {
@@ -1132,8 +1141,12 @@ impl PlayerView {
                                     cx.notify();
                                 }),
                             ),
-                    )),
+                    ))
+                    .when(show_vol_level, |d| {
+                        d.child(div().min_w(px(26.)).text_sm().whitespace_nowrap().text_color(white()).child(vol_level.to_string()))
+                    }),
             )
+            .when(show_vol_level, |d| d.child(div().mx_3().h_4().w(px(1.)).bg(hsla(0., 0., 1., 0.3))))
             .child(div().ml_2().text_sm().whitespace_nowrap().text_color(white()).child(time_text))
             .when_some(chapter_title.filter(|_| !narrow && !store::settings_snapshot().hide_chapters), |d, c| {
                 d.child(

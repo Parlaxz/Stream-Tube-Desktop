@@ -470,6 +470,48 @@ struct Tab {
     player: Entity<Player>,
 }
 
+/// Drag payload for reordering tabs in the rail and the tab grid.
+struct TabDrag {
+    id: u64,
+    label: SharedString,
+    icon: &'static str,
+}
+
+/// Ghost shown under the pointer while a tab is dragged.
+struct TabDragView {
+    label: SharedString,
+    icon: &'static str,
+}
+
+impl Render for TabDragView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = pal(cx);
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(30.))
+            .px_3()
+            .w(px(200.))
+            .rounded_lg()
+            .bg(p.surface2)
+            .shadow_md()
+            .opacity(0.9)
+            .child(icon(self.icon).size_4().text_color(p.accent))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_sm()
+                    .text_color(p.text)
+                    .child(self.label.clone()),
+            )
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct SavedTab {
     route: Route,
@@ -618,6 +660,10 @@ impl AppView {
                 let mut active = usize::MAX;
                 let mut id = 1u64;
                 for (i, st) in saved.tabs.into_iter().enumerate() {
+                    // Home is the pinned first tab, so a saved Home tab becomes it
+                    if matches!(&st.route, Route::Home) {
+                        continue;
+                    }
                     if matches!(&st.route, Route::Channel(x) | Route::Playlist(x) | Route::Watch { id: x, .. } if x.is_empty()) {
                         continue;
                     }
@@ -637,37 +683,31 @@ impl AppView {
                     });
                     id += 1;
                 }
-                if !tabs.is_empty() {
-                    let active = if active == usize::MAX { 0 } else { active.min(tabs.len() - 1) };
-                    let route = tabs[active].route.clone();
-                    let p = tabs[active].player.clone();
-                    restored = Some((tabs, active, id, route, p));
-                }
+                tabs.insert(0, Self::home_tab(player(cx)));
+                let active = if active == usize::MAX { 0 } else { active.min(tabs.len().saturating_sub(2)) + 1 };
+                let route = tabs[active].route.clone();
+                let p = tabs[active].player.clone();
+                restored = Some((tabs, active, id, route, p));
             }
         }
         let (tabs, active_tab, next_tab_id, start, p) = restored.unwrap_or_else(|| {
-            let p = player(cx);
             let start = arg_route.unwrap_or_else(|| match store::settings_snapshot().start_page.as_str() {
                 "subscriptions" => Route::Subscriptions(None),
                 "history" => Route::History,
                 _ => Route::Home,
             });
-            (
-                vec![Tab {
-                    id: 1,
-                    route: start.clone(),
-                    title: None,
-                    channel: None,
-                    page: None,
-                    history: Vec::new(),
-                    forward: Vec::new(),
-                    player: p.clone(),
-                }],
-                0,
-                2,
-                start,
-                p,
-            )
+            let mut tabs = vec![Self::home_tab(player(cx))];
+            let mut next = 1u64;
+            let active = if start == Route::Home {
+                0
+            } else {
+                let p = crate::player::controller::create(cx);
+                tabs.push(Tab { id: 1, route: start.clone(), title: None, channel: None, page: None, history: Vec::new(), forward: Vec::new(), player: p });
+                next = 2;
+                1
+            };
+            let p = tabs[active].player.clone();
+            (tabs, active, next, start, p)
         });
         crate::player::controller::set_active(p.clone(), cx);
         // Only re-render the shell when the mini player appears/disappears; the
@@ -1228,6 +1268,20 @@ impl AppView {
             Route::Channel(id) | Route::Playlist(id) | Route::Watch { id, .. } if id.is_empty() => return,
             _ => {}
         }
+        // Home is the pinned first tab: going Home from another tab shows it
+        if route == Route::Home && self.active_tab != 0 {
+            self.switch_tab(0, window, cx);
+            return;
+        }
+        // ...and the pinned tab never navigates away; targets open in a new tab
+        if self.active_tab == 0 && route != Route::Home {
+            self.new_tab(route, None, None, true, window, cx);
+            // Back in that tab returns to the Home page it was opened from
+            if let Some(page) = self.tabs[0].page.clone() {
+                self.history.push((Route::Home, page));
+            }
+            return;
+        }
         cx.set_global(OpenMenu(None));
         crate::player::preview::stop(cx);
         crate::ui::image_cache::on_navigate(cx);
@@ -1270,10 +1324,31 @@ impl AppView {
 
     // ───── tabs ─────
 
+    /// The pinned first tab. It always shows Home and is never closed or moved.
+    fn home_tab(player: Entity<Player>) -> Tab {
+        Tab {
+            id: 0,
+            route: Route::Home,
+            title: None,
+            channel: None,
+            page: None,
+            history: Vec::new(),
+            forward: Vec::new(),
+            player,
+        }
+    }
+
     pub fn new_tab(&mut self, route: Route, title: Option<String>, channel: Option<String>, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
         match &route {
             Route::Channel(id) | Route::Playlist(id) | Route::Watch { id, .. } if id.is_empty() => return,
             _ => {}
+        }
+        // Home is the single pinned tab, so opening it shows that tab
+        if route == Route::Home {
+            if switch {
+                self.switch_tab(0, window, cx);
+            }
+            return;
         }
         cx.set_global(OpenMenu(None));
         let id = self.next_tab_id;
@@ -1349,7 +1424,8 @@ impl AppView {
     }
 
     pub fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.len() < 2 || index >= self.tabs.len() {
+        // the pinned Home tab cannot close
+        if index == 0 || index >= self.tabs.len() {
             return;
         }
         if index == self.active_tab {
@@ -1371,6 +1447,26 @@ impl AppView {
             let i = (self.active_tab as isize + step).rem_euclid(n) as usize;
             self.switch_tab(i, window, cx);
         }
+    }
+
+    /// Live drag-to-reorder: when the pointer enters another tab, the dragged
+    /// tab takes its place. Works for the horizontal rail and the grid alike.
+    fn drag_reorder(&mut self, drag_id: u64, target_id: u64, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if !bounds.contains(&position) {
+            return;
+        }
+        let Some(from) = self.tabs.iter().position(|t| t.id == drag_id) else { return };
+        let Some(to) = self.tabs.iter().position(|t| t.id == target_id) else { return };
+        // the pinned Home tab stays first
+        if from == to || from == 0 || to == 0 {
+            return;
+        }
+        let active_id = self.tabs[self.active_tab].id;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active_tab = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(self.active_tab);
+        self.save_tabs(cx);
+        cx.notify();
     }
 
     /// A short name for a tab's page.
@@ -1405,9 +1501,6 @@ impl AppView {
     }
 
     fn render_tabs(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.tabs.len() < 2 {
-            return None;
-        }
         let p = pal(cx);
         let mut tabs = div()
             .id("tabs")
@@ -1419,6 +1512,8 @@ impl AppView {
             .overflow_x_scroll();
         for i in 0..self.tabs.len() {
             let active = i == self.active_tab;
+            // the pinned Home tab is an icon only: no label, no close, no drag
+            let pinned = i == 0;
             let route = if active { self.route.clone() } else { self.tabs[i].route.clone() };
             let id = self.tabs[i].id;
             let label = Self::tab_label(&route, if active { None } else { self.tabs[i].title.as_deref() }, &self.tabs[i].player, cx);
@@ -1444,9 +1539,8 @@ impl AppView {
                 .items_center()
                 .gap_2()
                 .h(px(30.))
-                .pl_3()
-                .pr_1()
-                .w(px(200.))
+                .when(pinned, |d| d.w(px(30.)).justify_center())
+                .when(!pinned, |d| d.pl_3().pr_1().w(px(200.)))
                 .rounded_lg()
                 .cursor_pointer()
                 .when(active, |d| d.bg(p.surface2))
@@ -1465,36 +1559,51 @@ impl AppView {
                         }
                     }),
                 )
+                .when(!pinned, |d| {
+                    d.on_drag(TabDrag { id, label: label.clone().into(), icon: Self::tab_icon(&route) }, |d: &TabDrag, _, _, cx| {
+                        cx.new(|_| TabDragView { label: d.label.clone(), icon: d.icon })
+                    })
+                    .on_drag_move::<TabDrag>(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                        // the tab grid overlays the rail; only its items reorder while it is open
+                        if this.tab_grid_open {
+                            return;
+                        }
+                        let Some(drag_id) = ev.dragged_item().downcast_ref::<TabDrag>().map(|d| d.id) else { return };
+                        this.drag_reorder(drag_id, id, ev.bounds, ev.event.position, cx);
+                    }))
+                })
                 .child(icon(Self::tab_icon(&route)).size_4().text_color(if active { p.accent } else { p.text2 }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_sm()
-                        .text_color(if active { p.text } else { p.text2 })
-                        .child(label.clone()),
-                )
-                .child(
-                    div()
-                        .id(("tab-close", id))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .size(px(22.))
-                        .rounded_md()
-                        .hover(|d| d.bg(p.hover))
-                        .child(icon("x").size_3p5().text_color(p.text2))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
-                                this.close_tab(i, window, cx);
-                            }
-                        })),
-                );
+                .when(!pinned, |d| {
+                    d.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .text_color(if active { p.text } else { p.text2 })
+                            .child(label.clone()),
+                    )
+                    .child(
+                        div()
+                            .id(("tab-close", id))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(22.))
+                            .rounded_md()
+                            .hover(|d| d.bg(p.hover))
+                            .child(icon("x").size_3p5().text_color(p.text2))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
+                                    this.close_tab(i, window, cx);
+                                }
+                            })),
+                    )
+                });
             if let Some(thumb) = thumb {
                 let tip_title = label;
                 tab = tab.tooltip(move |window, cx| {
@@ -1657,6 +1766,7 @@ impl AppView {
                     heading = heading.child(avatar(Some(a.as_str()), px(22.), &label, cx));
                 }
             }
+            let drag_label: SharedString = label.clone().into();
             heading = heading.child(
                 div()
                     .flex_1()
@@ -1681,6 +1791,16 @@ impl AppView {
                         this.tab_grid_open = false;
                         cx.notify();
                     }))
+                    // the pinned Home tab stays first, so it does not drag
+                    .when(id != 0, |d| {
+                        d.on_drag(TabDrag { id, label: drag_label, icon: icon_name }, |d: &TabDrag, _, _, cx| {
+                            cx.new(|_| TabDragView { label: d.label.clone(), icon: d.icon })
+                        })
+                        .on_drag_move::<TabDrag>(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
+                            let Some(drag_id) = ev.dragged_item().downcast_ref::<TabDrag>().map(|d| d.id) else { return };
+                            this.drag_reorder(drag_id, id, ev.bounds, ev.event.position, cx);
+                        }))
+                    })
                     .child(
                         div()
                             .relative()

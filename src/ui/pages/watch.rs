@@ -648,6 +648,8 @@ impl WatchPage {
         let ratio = like_n.zip(dislike_n).filter(|(l, d)| l + d > 0).map(|(l, d)| l as f32 / (l + d) as f32);
         let video_item = self.player.read(cx).video.clone().unwrap_or_else(|| VideoItem { id: w.id.clone(), title: w.title.clone(), ..Default::default() });
         let cid = w.channel.id.clone();
+        let cname = w.channel.name.clone();
+        let cname_hover = if p.dark { white() } else { p.text2 };
         let title = if s.dearrow_titles {
             services::branding_cached(&w.id).flatten().and_then(|b| b.title).unwrap_or(w.title.clone())
         } else {
@@ -683,13 +685,39 @@ impl WatchPage {
                                     .items_center()
                                     .gap_3()
                                     .cursor_pointer()
-                                    .on_click(move |_, window, cx| navigate(Route::Channel(cid.clone()), window, cx))
-                                    .child(avatar(w.channel.avatar.as_deref(), px(40.), &w.channel.name, cx))
+                                    .on_click({
+                                        let (cid, cname) = (cid.clone(), cname.clone());
+                                        move |ev, window, cx| open_channel(Some(Route::Channel(cid.clone())), &cname, ev, window, cx)
+                                    })
+                                    .on_aux_click({
+                                        let (cid, cname) = (cid.clone(), cname.clone());
+                                        move |ev, window, cx| {
+                                            if ev.is_middle_click() {
+                                                open_channel(Some(Route::Channel(cid.clone())), &cname, ev, window, cx);
+                                            }
+                                        }
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(p.border.opacity(0.0))
+                                            .hover(move |s| s.border_color(p.text2))
+                                            .child(avatar(w.channel.avatar.as_deref(), px(40.), &w.channel.name, cx)),
+                                    )
                                     .child(
                                         div()
                                             .flex()
                                             .flex_col()
-                                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(w.channel.name.clone()))
+                                            .child(
+                                                div()
+                                                    .text_base()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(p.text)
+                                                    .hover(move |s| s.text_color(cname_hover))
+                                                    .child(w.channel.name.clone()),
+                                            )
                                             .when_some(w.channel.subscribers_text.clone(), |d, t| d.child(div().text_xs().text_color(p.text2).child(t))),
                                     ),
                             )

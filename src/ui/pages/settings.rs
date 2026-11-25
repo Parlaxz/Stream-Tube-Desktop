@@ -623,6 +623,23 @@ impl SettingsPage {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(p.text)
+                            .child("Volume"),
+                    )
+                    .child(row(
+                        "Hide volume level",
+                        "Hide the number beside the volume bar in the player",
+                        switch("volnum", s.hide_volume_level, |s, v| s.hide_volume_level = v, cx),
+                        cx,
+                    )),
+            )
+            .child(
+                card(cx)
+                    .child(
+                        div()
+                            .pt_2()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.text)
                             .child("Read ahead"),
                     )
                     .child(row(

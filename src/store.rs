@@ -42,6 +42,8 @@ pub struct Settings {
     pub autoplay_next: bool,
     pub resume_playback: bool,
     pub volume: f64,
+    /// Hide the number beside the volume bar in the player.
+    pub hide_volume_level: bool,
     pub hwdec: bool,
     pub audio_only: bool,
     pub captions_enabled: bool,
@@ -183,6 +185,7 @@ impl Default for Settings {
             autoplay_next: true,
             resume_playback: true,
             volume: 80.0,
+            hide_volume_level: false,
             hwdec: true,
             audio_only: false,
             captions_enabled: false,

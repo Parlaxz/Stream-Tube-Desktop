@@ -5,6 +5,7 @@ use crate::api::types::*;
 use crate::player::controller::{Player, player};
 use crate::store;
 use crate::ui::app::{Route, UiState, navigate};
+use crate::ui::cards::open_channel;
 use crate::ui::*;
 use crate::ui::pages::watch::{reply_parents, thread_branch};
 use crate::ui::widgets::{Load, comment_body};
@@ -684,12 +685,27 @@ impl Render for ShortsPage {
                                     .items_center()
                                     .gap_2()
                                     .cursor_pointer()
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(c) = cid.clone() {
-                                            navigate(Route::Channel(c), window, cx);
+                                    .on_click({
+                                        let (cid, cname) = (cid.clone(), v.channel_name.clone());
+                                        move |ev, window, cx| open_channel(cid.clone().map(Route::Channel), &cname, ev, window, cx)
+                                    })
+                                    .on_aux_click({
+                                        let (cid, cname) = (cid.clone(), v.channel_name.clone());
+                                        move |ev, window, cx| {
+                                            if ev.is_middle_click() {
+                                                open_channel(cid.clone().map(Route::Channel), &cname, ev, window, cx);
+                                            }
                                         }
                                     })
-                                    .child(avatar(v.channel_avatar.as_deref(), px(32.), &v.channel_name, cx))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(white().opacity(0.0))
+                                            .hover(|s| s.border_color(white()))
+                                            .child(avatar(v.channel_avatar.as_deref(), px(32.), &v.channel_name, cx)),
+                                    )
                                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(white()).child(v.channel_name.clone())),
                             )
                             .child(div().text_sm().text_color(white()).line_clamp(2).child(v.title.clone())),

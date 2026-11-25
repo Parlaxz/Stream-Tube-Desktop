@@ -1019,6 +1019,7 @@ impl Player {
 
     pub fn set_volume(&mut self, v: f64) {
         let v = v.clamp(0.0, 150.0);
+        eprintln!("[VOL] set_volume raw={v} old={}", self.volume);
         self.volume = v;
         if let Some(m) = &self.mpv {
             m.set_f64("volume", v);
