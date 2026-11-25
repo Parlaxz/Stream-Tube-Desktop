@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.10.0
+
+### Upstream sync
+
+- Updated to upstream `bdcab25` (196 commits). Fork features win wherever the two overlap; the rest of the upstream work is included.
+- Kept the fork's tab and player model (a player per tab, pinned Home tab) instead of upstream's shared-player tabs.
+
+### Player
+
+- Aspect ratio menu in the player, plus `Z` to cycle: **Auto** finds and crops a film's black bars for 21:9 and 32:9 screens, or pick 21:9, 18:9, 32:9, *Zoom to fill* or *Stretch*.
+- Step one frame at a time with `,` / `.` while paused, or **Previous frame** / **Next frame** in the right-click menu.
+- The volume bar shows its level as a number; **Settings → Player → Hide volume level** hides it.
+- In theater mode, the wheel over the right edge of the player scrolls the page instead of changing the volume.
+- Playback keeps the display awake on supported systems, and a stalled decoder (no new frames after a seek) now recovers or reports the error.
+- Buffered ranges stay visible after seeking backwards.
+
+### Tabs
+
+- Home is a pinned first tab: icon only, always first, never closed, dragged or navigated away. Opening Home or another page from it opens a new tab.
+- Drag tabs to reorder them, in the tab rail and in the tab grid.
+
+### Cards, channels and shorts
+
+- Middle-click or Ctrl+click a channel name or avatar to open the channel in a new background tab; hovering the avatar shows a ring.
+- Shorts cards show views and upload date in one line.
+- Hover a video title to read it in full.
+
+### Downloads
+
+- Download a transcript as plain text (`.txt`) or timestamped subtitles (`.srt`) from the Download menu. With several caption tracks, pick the language; automatically generated tracks are labelled.
+
+### Languages
+
+- **Settings → General → App language** offers English, Azerbaijani, French, German, Japanese, Kazakh, Russian, Turkish, Ukrainian, Simplified Chinese and Traditional Chinese. YouTube and caption languages follow it until you choose them separately.
+
+### Shorts
+
+- Upcoming Shorts are preloaded, so moving to the next one starts faster.
+
+### Updates and packaging
+
+- Portable Windows builds can update in place, keeping settings and history.
+- The RPM package now requires the libmpv SONAME the app actually links.
+- A second launch hands its link to the running instance; the handoff is token-checked.
+
+### Fixes
+
+- Hover previews are positioned when a card is first hovered.
+- Slow downloads continue while data arrives.
+- Translation fixes for comment reply counts, live chat status and playlist cleanup notices.
+
 ## 0.9.0
 
 ### Custom Features
