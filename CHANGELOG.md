@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.4
+
+### Tabs
+
+- A closed group shows only its pill in the rail; the border is hidden.
+- **New group** is a **+** button; the label shows only as a hover tooltip.
+- The columns and sort pills are text-only, so the empty gap inside them is gone.
+- Tab thumbnails use a 16:9 `mqdefault` image: the black bar at the top and the matching cut at the bottom are gone, and thumbnails have a rounded border.
+- Home is removed from the tab grid and the non-video pills; the layout count excludes it.
+- Dragging a tab over a group expands and highlights that group, and the target group flashes after the drop.
+
+### Social
+
+- The Social page has **Home**, **Room** and **Settings** tabs.
+- **Home**: create or open a room, friends' rooms with Join, share what you are watching, shared-with-you and friends' activity.
+- **Room**: enabled while in a room; shows the current video, the room queue with play/remove, **Open room tab** and **Leave**.
+- **Settings**: relay, token and name, your friend code, add a friend, and the friend list with Invite/Send/Remove.
+
 ## 0.11.3
 
 ### Fixed

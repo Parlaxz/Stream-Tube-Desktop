@@ -846,6 +846,8 @@ pub struct AppView {
     tab_sort: String,
     /// group pill under a dragged tab (0 = the All pill)
     drag_hover_group: Option<u64>,
+    /// group that just received a dragged tab (brief highlight)
+    group_flash: Option<u64>,
     _subs: Vec<Subscription>,
 }
 
@@ -1127,6 +1129,7 @@ impl AppView {
             tab_grid_cols: store::kv_get("tab_grid_cols").and_then(|s| s.parse().ok()).unwrap_or(6),
             tab_sort: store::kv_get("tab_sort").unwrap_or_else(|| "manual".into()),
             drag_hover_group: None,
+            group_flash: None,
             focus,
             pending_watch_sync: None,
             login: LoginFlow::default(),
@@ -1901,8 +1904,14 @@ impl AppView {
                     }))
                     .on_aux_click(cx.listener(move |this, _, window, cx| this.open_group_editor(gid, window, cx)))
                     .on_drag_move::<TabDrag>(cx.listener(move |this, _, _, cx| {
-                        if this.drag_hover_group != Some(gid) {
-                            this.drag_hover_group = Some(gid);
+                        let changed = this.drag_hover_group != Some(gid);
+                        this.drag_hover_group = Some(gid);
+                        if let Some(g) = this.groups.iter_mut().find(|g| g.id == gid) {
+                            if g.collapsed {
+                                g.collapsed = false;
+                            }
+                        }
+                        if changed {
                             cx.notify();
                         }
                     }))
@@ -1910,13 +1919,6 @@ impl AppView {
                     .into_any_element());
         }
         for i in 0..self.tabs.len() {
-            if i != self.active_tab {
-                if let Some(gid) = self.tabs[i].group {
-                    if self.group(gid).is_some_and(|g| g.collapsed) {
-                        continue;
-                    }
-                }
-            }
             let active = i == self.active_tab;
             // the pinned Home tab is an icon only: no label, no close, no drag
             let pinned = i == 0;
@@ -2038,15 +2040,12 @@ impl AppView {
         for g in self.groups.clone() {
             let Some(pill) = group_pills.remove(&g.id) else { continue };
             let border: Hsla = rgb(g.color).into();
-            let mut strip = div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .p_0p5()
-                .rounded_lg()
-                .border_1()
-                .border_color(border)
-                .child(pill);
+            let hovered = self.drag_hover_group == Some(g.id);
+            let flash = self.group_flash == Some(g.id);
+            // no border around a closed group: just its pill
+            let mut strip = div().flex().items_center().gap_1().rounded_lg().when(!g.collapsed, |d| {
+                d.p_0p5().border_1().border_color(if hovered || flash { p.accent } else { border })
+            }).child(pill);
             if !g.collapsed {
                 for i in 1..self.tabs.len() {
                     if self.tabs[i].group == Some(g.id) {
@@ -2056,7 +2055,11 @@ impl AppView {
                     }
                 }
             }
-            rail = rail.child(strip);
+            rail = rail.child(strip.with_animation(
+                SharedString::from(format!("rail-group-{}-{}", g.id, hovered)),
+                Animation::new(std::time::Duration::from_millis(120)).with_easing(ease_out_quint()),
+                |el, delta| el.opacity(0.85 + 0.15 * delta),
+            ));
         }
         for i in 1..self.tabs.len() {
             if self.tabs[i].group.is_none() {
@@ -2140,6 +2143,19 @@ impl AppView {
         if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             t.group = group;
         }
+        if let Some(gid) = group {
+            self.group_flash = Some(gid);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(420)).await;
+                let _ = this.update(cx, |a, cx| {
+                    if a.group_flash == Some(gid) {
+                        a.group_flash = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         self.save_tabs(cx);
         cx.notify();
     }
@@ -2221,7 +2237,7 @@ impl AppView {
             return None;
         }
         let p = pal(cx);
-        let n = self.tabs.len().max(1);
+        let n = self.tabs.len().saturating_sub(1).max(1);
         let cols = if self.tab_grid_dynamic {
             let rows = ((n as f64).sqrt().floor() as usize).max(1);
             (n + rows - 1) / rows
@@ -2239,6 +2255,7 @@ impl AppView {
         // display order: optional group filter, then the chosen sort
         let order = {
             let mut order: Vec<usize> = (0..self.tabs.len()).collect();
+            order.retain(|&i| i != 0); // the pinned Home tab is not in the grid
             if let Some(gid) = self.tab_grid_group {
                 order.retain(|&i| self.tabs[i].group == Some(gid));
             } else {
@@ -2385,6 +2402,7 @@ impl AppView {
                             .rounded_lg()
                             .bg(p.surface2)
                             .when(active, |d| d.border_2().border_color(p.accent))
+                            .when(!active, |d| d.border_1().border_color(p.border))
                             .child(picture)
                             .when(id != 0, |d| {
                                 d.child(
@@ -2460,13 +2478,15 @@ impl AppView {
         for g in &groups {
             let gid = g.id;
             let selected = self.tab_grid_group == Some(gid);
+            let hovered = self.drag_hover_group == Some(gid);
+            let flash = self.group_flash == Some(gid);
             let icon_color: Hsla = rgb(g.color).into();
             group_row = group_row.child(
                 pill_base(div().id(("tg-g", gid)))
-                    .bg(if selected { p.accent } else { p.chip })
-                    .text_color(if selected { white() } else { p.text })
-                    .when(self.drag_hover_group == Some(gid), |d| d.border_2().border_color(p.accent))
-                    .child(icon(&g.icon).size_4().text_color(if selected { white() } else { icon_color }))
+                    .bg(if selected || flash { p.accent } else if hovered { p.hover } else { p.chip })
+                    .text_color(if selected || hovered || flash { white() } else { p.text })
+                    .when(hovered || flash, |d| d.border_2().border_color(p.accent))
+                    .child(icon(&g.icon).size_4().text_color(if selected || hovered || flash { white() } else { icon_color }))
                     .child(g.name.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.tab_grid_group = if selected { None } else { Some(gid) };
@@ -2483,16 +2503,26 @@ impl AppView {
             );
         }
         group_row = group_row.child(
-            pill_base(div().id("tg-g-new"))
+            div()
+                .id("tg-g-new")
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(28.))
+                .rounded_full()
                 .bg(p.chip)
-                .text_color(p.text)
-                .child(icon("plus").size_4())
-                .child("New group")
+                .cursor_pointer()
+                .hover(|d| d.bg(p.hover))
+                .child(icon("plus").size_4().text_color(p.text))
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("New group").build(window, cx))
                 .on_click(cx.listener(|this, _, window, cx| this.new_group(window, cx))),
         );
 
         let mut nv_row = div().flex().items_center().gap_2().flex_wrap();
         for (i, tab) in self.tabs.iter().enumerate() {
+            if i == 0 {
+                continue; // the pinned Home tab is not a badge
+            }
             let active = i == self.active_tab;
             let route = if active { self.route.clone() } else { tab.route.clone() };
             if matches!(route, Route::Watch { .. } | Route::Shorts(Some(_))) {
@@ -2528,7 +2558,6 @@ impl AppView {
             .id("tg-cols")
             .flex()
             .items_center()
-            .gap_2()
             .px_3()
             .h(px(28.))
             .rounded_full()
@@ -2552,7 +2581,6 @@ impl AppView {
                 store::kv_set("tab_grid_cols", &this.tab_grid_cols.to_string());
                 cx.notify();
             }))
-            .child(icon("layout-grid").size_4())
             .child(cols_label);
 
         let sort_label = match self.tab_sort.as_str() {
@@ -2565,7 +2593,6 @@ impl AppView {
             .id("tg-sort")
             .flex()
             .items_center()
-            .gap_2()
             .px_3()
             .h(px(28.))
             .rounded_full()
@@ -2584,7 +2611,6 @@ impl AppView {
                 store::kv_set("tab_sort", &this.tab_sort);
                 cx.notify();
             }))
-            .child(icon("arrow-down-up").size_4())
             .child(sort_label);
 
         // group editor replaces the grid while open

@@ -1,7 +1,16 @@
-//! Social page: relay, friends, rooms, shared videos and friends' activity.
+//! Social page: a Home hub for rooms and activity, the room lobby, and
+//! connection/friend settings.
 use crate::room;
+use crate::ui::cards::compact_row_with;
 use crate::ui::*;
 use gpui_kit::component::input::{Input, InputState};
+
+#[derive(Clone, Copy, PartialEq)]
+enum SocialTab {
+    Home,
+    Room,
+    Settings,
+}
 
 pub struct SocialPage {
     relay: Entity<InputState>,
@@ -10,7 +19,7 @@ pub struct SocialPage {
     add_id: Entity<InputState>,
     add_name: Entity<InputState>,
     show_codes: bool,
-    show_conn: bool,
+    tab: SocialTab,
 }
 
 impl SocialPage {
@@ -33,7 +42,7 @@ impl SocialPage {
         });
         let add_id = cx.new(|cx| InputState::new(window, cx).placeholder("friend code"));
         let add_name = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
-        Self { relay, token, name, add_id, add_name, show_codes: false, show_conn: false }
+        Self { relay, token, name, add_id, add_name, show_codes: false, tab: SocialTab::Home }
     }
 }
 
@@ -108,10 +117,35 @@ fn activity_row(a: &room::Activity, p: Pal, cx: &mut App) -> AnyElement {
     col.into_any_element()
 }
 
+fn tab_pill(id: &'static str, label: &str, active: bool, enabled: bool, p: Pal) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .px_4()
+        .h(px(32.))
+        .rounded_full()
+        .bg(if active { p.accent } else { p.chip })
+        .text_sm()
+        .when(active, |d| d.font_weight(FontWeight::MEDIUM))
+        .text_color(if active { white() } else { p.text })
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.88))
+        .when(!enabled, |d| d.opacity(0.35))
+        .child(label.to_string())
+}
+
 impl Render for SocialPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
         let snap = room::snapshot(cx);
+        let connected = snap.status != room::Status::Offline;
+        let in_room = snap.room.is_some();
+        if !in_room && self.tab == SocialTab::Room {
+            self.tab = SocialTab::Home;
+        }
         let (status, status_color): (&str, Hsla) = match snap.status {
             room::Status::Offline => ("Offline", p.text3),
             room::Status::Connecting => ("Connecting…", p.text2),
@@ -119,70 +153,43 @@ impl Render for SocialPage {
             room::Status::InRoom => ("In a room", rgb(0x2ba640).into()),
         };
 
-        // connection
-        let show_fields = self.show_conn || snap.status == room::Status::Offline;
+        // ── settings: connection form ──
         let mut conn = card(p)
+            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Connection"))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap_3()
+                    .child(field("Relay (host:port)", &self.relay, 220., p))
+                    .child(field("Token", &self.token, 180., p))
+                    .child(field("Your name", &self.name, 140., p))
+                    .child(
+                        button("room-connect", if snap.status == room::Status::Offline { "Connect" } else { "Reconnect" }, p, true)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                let relay = this.relay.read(cx).value().trim().to_string();
+                                let token = this.token.read(cx).value().trim().to_string();
+                                let name = this.name.read(cx).value().trim().to_string();
+                                room::save_settings(relay, token, name, cx);
+                                room::connect(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Social"))
-                            .child(div().text_xs().text_color(p.text2).child(if snap.status == room::Status::Offline {
-                                "Connect to your relay to see friends".to_string()
-                            } else {
-                                format!("{} as {}", snap.cfg.relay, snap.cfg.name)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .when(snap.status != room::Status::Offline, |d| {
-                                d.child(button("social-conn-toggle", if self.show_conn { "Hide connection" } else { "Connection" }, p, false).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.show_conn = !this.show_conn;
-                                        cx.notify();
-                                    }),
-                                ))
-                            })
-                            .when(snap.status != room::Status::Offline, |d| {
-                                d.child(button("room-off", "Disconnect", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                                    room::disconnect(cx);
-                                    cx.notify();
-                                })))
-                            })
-                            .child(dot(snap.status != room::Status::Offline, p))
-                            .child(div().text_sm().text_color(status_color).child(status.to_string())),
-                    ),
+                    .gap_2()
+                    .child(dot(connected, p))
+                    .child(div().text_sm().text_color(status_color).child(status.to_string()))
+                    .when(connected, |d| {
+                        d.child(button("room-off", "Disconnect", p, false).on_click(cx.listener(|_, _, _w, cx| {
+                            room::disconnect(cx);
+                            cx.notify();
+                        })))
+                    }),
             )
-            .when(show_fields, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_end()
-                        .gap_3()
-                        .child(field("Relay (host:port)", &self.relay, 220., p))
-                        .child(field("Token", &self.token, 180., p))
-                        .child(field("Your name", &self.name, 140., p))
-                        .child(
-                            button("room-connect", if snap.status == room::Status::Offline { "Connect" } else { "Reconnect" }, p, true)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    let relay = this.relay.read(cx).value().trim().to_string();
-                                    let token = this.token.read(cx).value().trim().to_string();
-                                    let name = this.name.read(cx).value().trim().to_string();
-                                    room::save_settings(relay, token, name, cx);
-                                    room::connect(cx);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
             .when_some(snap.error.clone(), |d, e| d.child(div().text_xs().text_color(rgb(0xff4e45)).child(e)));
 
         // my friend code, hidden until asked for
@@ -208,7 +215,7 @@ impl Render for SocialPage {
         }
         conn = conn.child(code_row);
 
-        // friends
+        // ── settings: friends ──
         let mut friends = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Friends"));
         friends = friends.child(
             div()
@@ -275,7 +282,7 @@ impl Render for SocialPage {
             );
         }
 
-        // room
+        // ── home: room status / creation ──
         let mut room_card = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Room"));
         if let Some(info) = &snap.room {
             let role = if snap.host { "You are hosting" } else { "You are a guest" };
@@ -283,10 +290,15 @@ impl Render for SocialPage {
                 .child(div().flex().items_center().gap_2()
                     .child(div().text_sm().text_color(p.text).child(format!("Room {}", info.id)))
                     .child(div().text_xs().text_color(p.text2).child(role)))
-                .child(button("room-leave", "Leave room", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                    room::leave_room(cx);
-                    cx.notify();
-                })));
+                .child(div().flex().items_center().gap_2()
+                    .child(button("room-open-lobby", "Open lobby", p, true).on_click(cx.listener(|this, _, _, cx| {
+                        this.tab = SocialTab::Room;
+                        cx.notify();
+                    })))
+                    .child(button("room-leave", "Leave room", p, false).on_click(cx.listener(|_, _, _w, cx| {
+                        room::leave_room(cx);
+                        cx.notify();
+                    }))));
         } else {
             room_card = room_card.child(
                 div().flex().items_center().gap_3()
@@ -294,7 +306,7 @@ impl Render for SocialPage {
                         room::create_room(cx);
                         cx.notify();
                     })))
-                    .child(div().text_sm().text_color(p.text2).child("Then invite an online friend above.")),
+                    .child(div().text_sm().text_color(p.text2).child("Then invite a friend.")),
             );
         }
         if let Some(inv) = &snap.invite {
@@ -312,9 +324,10 @@ impl Render for SocialPage {
             );
         }
 
+        // ── home: friends' rooms ──
         let mut rooms = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Friends' rooms"));
         if snap.rooms.is_empty() {
-            rooms = rooms.child(div().text_sm().text_color(p.text3).child("No friend is hosting a room right now."));
+            rooms = rooms.child(div().text_sm().text_color(p.text3).child("No friend is hosting a room right now. Create one to start."));
         }
         for r in snap.rooms.clone() {
             let (room_id, host) = (r.room.clone(), r.host.clone());
@@ -335,6 +348,20 @@ impl Render for SocialPage {
             );
         }
 
+        // ── home: share the current video ──
+        let share_card = crate::room::current_video(cx).map(|v| {
+            let title = if v.title.is_empty() { v.id.clone() } else { v.title.clone() };
+            card(p)
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Share"))
+                .child(div().text_sm().text_color(p.text2).child(format!("Share “{title}” with your friends.")))
+                .child(button("social-share-now", "Share with friends", p, false).on_click(cx.listener(|_, _, _w, cx| {
+                    if let Some(v) = crate::room::current_video(cx) {
+                        room::share_all(v, cx);
+                    }
+                })))
+        });
+
+        // ── home: feeds ──
         let direct: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.action == "share" && !a.general).take(12).cloned().collect();
         let general: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.action != "share" || a.general).take(20).cloned().collect();
 
@@ -361,6 +388,169 @@ impl Render for SocialPage {
             }
         }
 
+        // ── room tab: the lobby ──
+        let mut lobby = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Room lobby"));
+        if let Some(info) = &snap.room {
+            let role = if snap.host { "You are hosting" } else { "You are a guest" };
+            let pe = crate::ui::app::room_player(cx);
+            let (current, queue, qpos) = match &pe {
+                Some(pe) => {
+                    let r = pe.read(cx);
+                    (r.video.clone(), r.queue.clone(), r.queue_pos)
+                }
+                None => (None, Vec::new(), None),
+            };
+            lobby = lobby
+                .child(div().flex().items_center().gap_2()
+                    .child(div().text_sm().text_color(p.text).child(format!("Room {}", info.id)))
+                    .child(div().text_xs().text_color(p.text2).child(role)))
+                .child(div().flex().items_center().gap_2()
+                    .child(button("social-open-room", "Open room tab", p, true).on_click(cx.listener(|_, _, _w, cx| {
+                        crate::ui::app::open_room(cx);
+                    })))
+                    .child(button("social-leave-room", "Leave room", p, false).on_click(cx.listener(|_, _, _w, cx| {
+                        room::leave_room(cx);
+                        cx.notify();
+                    }))));
+            if let Some(v) = &current {
+                lobby = lobby.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.text)
+                                .child(crate::ui::widgets::selectable_text(format!("social-room-video-{}", v.id), v.title.clone())),
+                        )
+                        .child(div().text_xs().text_color(p.text2).child(v.channel_name.clone())),
+                );
+            } else {
+                lobby = lobby.child(div().text_sm().text_color(p.text3).child("Nothing is playing yet."));
+            }
+            lobby = lobby.child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(format!("Queue ({})", queue.len())));
+            if queue.is_empty() {
+                lobby = lobby.child(div().text_sm().text_color(p.text3).child("The room queue is empty. Add videos from any tab."));
+            }
+            for (i, v) in queue.iter().enumerate() {
+                let remover = pe.clone();
+                let extra = vec![crate::ui::app::MenuItem::new("list-x", "Remove from queue", move |_, cx| {
+                    if let Some(pe) = &remover {
+                        pe.update(cx, |p, cx| {
+                            if i < p.queue.len() {
+                                p.queue.remove(i);
+                                if let Some(cur) = p.queue_pos.filter(|c| *c > i) {
+                                    p.queue_pos = Some(cur - 1);
+                                }
+                                cx.notify();
+                            }
+                        });
+                    }
+                })];
+                lobby = lobby.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().w_5().text_xs().text_color(p.text2).text_center().child(if qpos == Some(i) { "▶".to_string() } else { (i + 1).to_string() }))
+                        .child(compact_row_with(
+                            v,
+                            qpos == Some(i),
+                            Some(std::sync::Arc::new(move |_, cx: &mut App| room::play_index(i, cx))),
+                            extra,
+                            cx,
+                        )),
+                );
+            }
+        } else {
+            lobby = lobby
+                .child(div().text_sm().text_color(p.text2).child("You are not in a room. Create or join one from Home."))
+                .child(button("social-room-home", "Go to Home", p, false).on_click(cx.listener(|this, _, _, cx| {
+                    this.tab = SocialTab::Home;
+                    cx.notify();
+                })));
+        }
+
+        // ── compose ──
+        let mut content = div().flex().flex_col().gap_4();
+        match self.tab {
+            SocialTab::Home => {
+                let mut status_card = card(p)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Social"))
+                                    .child(div().text_xs().text_color(p.text2).child(if connected {
+                                        format!("{} as {}", snap.cfg.relay, snap.cfg.name)
+                                    } else {
+                                        "Not connected. Open Settings to connect.".to_string()
+                                    })),
+                            )
+                            .child(div().flex().items_center().gap_2().child(dot(connected, p)).child(div().text_sm().text_color(status_color).child(status.to_string()))),
+                    );
+                status_card = status_card.child(div().flex().items_center().gap_2()
+                    .child(button("social-go-settings", "Settings", p, false).on_click(cx.listener(|this, _, _, cx| {
+                        this.tab = SocialTab::Settings;
+                        cx.notify();
+                    })))
+                    .when(in_room, |d| d.child(button("social-go-room", "Room lobby", p, true).on_click(cx.listener(|this, _, _, cx| {
+                        this.tab = SocialTab::Room;
+                        cx.notify();
+                    })))));
+                content = content.child(status_card).child(room_card).child(rooms);
+                if let Some(share) = share_card {
+                    content = content.child(share);
+                }
+                content = content.child(shared).child(acts);
+            }
+            SocialTab::Room => {
+                content = content.child(lobby);
+            }
+            SocialTab::Settings => {
+                content = content.child(conn).child(friends);
+            }
+        }
+
+        let tab_home_active = self.tab == SocialTab::Home;
+        let tab_room_active = self.tab == SocialTab::Room;
+        let tab_settings_active = self.tab == SocialTab::Settings;
+        let bar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                tab_pill("social-tab-home", "Home", tab_home_active, true, p)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.tab = SocialTab::Home;
+                        cx.notify();
+                    })),
+            )
+            .when(in_room, |d| {
+                d.child(
+                    tab_pill("social-tab-room", "Room", tab_room_active, true, p)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.tab = SocialTab::Room;
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(!in_room, |d| d.child(tab_pill("social-tab-room", "Room", false, false, p)))
+            .child(
+                tab_pill("social-tab-settings", "Settings", tab_settings_active, true, p)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.tab = SocialTab::Settings;
+                        cx.notify();
+                    })),
+            );
+
         div()
             .id("social-page")
             .size_full()
@@ -377,12 +567,8 @@ impl Render for SocialPage {
                             .p_6()
                             .w_full()
                             .max_w(px(760.))
-                            .child(conn)
-                            .child(rooms)
-                            .child(friends)
-                            .child(room_card)
-                            .child(shared)
-                            .child(acts),
+                            .child(bar)
+                            .child(content),
                     ),
             )
     }
