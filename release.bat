@@ -33,13 +33,14 @@ if not errorlevel 1 (
 )
 
 rem Previous release = base for the delta patch. Its exe is cached in dist\exe.
+rem (a for /f would swallow the "=" in --abbrev=0)
 set "PREV_TAG="
-for /f "delims=" %%i in ('git describe --tags --abbrev=0 2^>nul') do set "PREV_TAG=%%i"
+git describe --tags --abbrev=0 > "%TEMP%\streamtube_prev_tag.txt" 2>nul
+if exist "%TEMP%\streamtube_prev_tag.txt" set /p PREV_TAG=<"%TEMP%\streamtube_prev_tag.txt"
+del "%TEMP%\streamtube_prev_tag.txt" >nul 2>nul
 set "PREV="
-if defined PREV_TAG (
-  set "PREV=%PREV_TAG%"
-  if /i "%PREV_TAG:~0,1%"=="v" set "PREV=%PREV_TAG:~1%"
-)
+if defined PREV_TAG set "PREV=%PREV_TAG%"
+if /i "%PREV_TAG:~0,1%"=="v" set "PREV=%PREV_TAG:~1%"
 
 set "CARGO=cargo"
 where cargo >nul 2>nul || set "CARGO=%USERPROFILE%\.cargo\bin\cargo.exe"
