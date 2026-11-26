@@ -1,4 +1,4 @@
-//! Video surface + YouTube-style controls.
+﻿//! Video surface + YouTube-style controls.
 use super::aspect;
 use super::controller::{KeyboardFeedback, Player};
 use crate::i18n::{t as translate, tf};
@@ -8,6 +8,7 @@ use crate::store;
 use crate::ui::app::{Route, UiState, navigate, open_menu};
 use crate::ui::cards::download_menu_items;
 use crate::ui::{icon, icon_button, pal};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::*;
 use gpui_kit::prelude::*;
 use std::cell::Cell;
@@ -32,7 +33,7 @@ fn playback_error_message(error: &str) -> String {
         let msg = if crate::api::web::connected() {
             "YouTube requested verification before providing a video stream."
         } else {
-            "YouTube blocked anonymous playback for this video. Connect “YouTube watch history” in Settings to play it with your account, or try another network."
+            "YouTube blocked anonymous playback for this video. Connect â€œYouTube watch historyâ€ in Settings to play it with your account, or try another network."
         };
         return crate::i18n::t(msg).into();
     }
@@ -45,7 +46,7 @@ mod playback_error_tests {
 
     #[::core::prelude::v1::test]
     fn explains_youtube_bot_check_errors() {
-        let message = playback_error_message("visionOS: Sign in to confirm you’re not a bot");
+        let message = playback_error_message("visionOS: Sign in to confirm youâ€™re not a bot");
         assert!(message.contains("anonymous playback"));
         assert!(message.contains("try another network."));
     }
@@ -90,8 +91,8 @@ pub struct PlayerView {
     menu_closed_at: std::time::Instant,
     seek_bounds: Rc<Cell<Bounds<Pixels>>>,
     vol_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// the read-ahead / back-cache slider in the cog menu
-    cache_bounds: Rc<Cell<Bounds<Pixels>>>,
+    ra_input: Entity<InputState>,
+    rb_input: Entity<InputState>,
     hover_frac: Option<f32>,
     drag_seek: Option<f32>,
     /// A press near the seek bar started a seek; the click layer ignores it.
@@ -119,7 +120,20 @@ pub struct PlayerView {
 }
 
 impl PlayerView {
-    pub fn new(player: Entity<Player>, mini: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(player: Entity<Player>, mini: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let s = store::settings_snapshot();
+        let ra = s.read_ahead_mb.to_string();
+        let rb = s.read_ahead_back_mb.to_string();
+        let ra_input = cx.new(|cx| {
+            let mut i = InputState::new(window, cx);
+            i.set_value(ra, window, cx);
+            i
+        });
+        let rb_input = cx.new(|cx| {
+            let mut i = InputState::new(window, cx);
+            i.set_value(rb, window, cx);
+            i
+        });
         let sub = cx.observe(&player, |_, _, cx| cx.notify());
         Self {
             stats_tick: None,
@@ -132,7 +146,8 @@ impl PlayerView {
             menu_closed_at: Instant::now() - std::time::Duration::from_secs(5),
             seek_bounds: Rc::new(Cell::new(Bounds::default())),
             vol_bounds: Rc::new(Cell::new(Bounds::default())),
-            cache_bounds: Rc::new(Cell::new(Bounds::default())),
+            ra_input,
+            rb_input,
             hover_frac: None,
             drag_seek: None,
             zone_seek: None,
@@ -253,7 +268,7 @@ impl Render for PlayerView {
         let short_cover = video.as_ref().filter(|_| ui.shorts && !mini && !self.pip && !audio_only && (pl.loading || frame.is_none()) && error.is_none());
         let picture = frame.clone().filter(|_| !audio_only && short_cover.is_none());
 
-        // ── video surface ──
+        // â”€â”€ video surface â”€â”€
         // A card's overflow_hidden clips to a rectangle in GPUI, so the player rounds its
         // own corners: all four on the watch page, the top two in the mini player (its
         // title sits below), none when it fills the window.
@@ -1444,7 +1459,7 @@ impl PlayerView {
                         .hover(|s| s.bg(hsla(0., 0., 1., 0.15)))
                         .text_sm()
                         .text_color(white())
-                        .child(div().flex_none().child("•"))
+                        .child(div().flex_none().child("â€¢"))
                         .child(div().min_w_0().max_w(px(260.)).truncate().child(c))
                         .child(icon("chevron-right").size_4().text_color(white()))
                         // opens the chapter list beside the player
@@ -1889,7 +1904,7 @@ impl PlayerView {
                         .justify_center()
                         .gap_3()
                         .py_2()
-                        .child(div().id("s-dec").px_3().py_1().rounded_md().bg(hsla(0., 0., 1., 0.15)).cursor_pointer().text_color(white()).child("− 0.05").on_click(cx.listener(|t, _, _, cx| t.player.update(cx, |p, cx| { let s = p.speed; p.set_speed(s - 0.05); cx.notify() }))))
+                        .child(div().id("s-dec").px_3().py_1().rounded_md().bg(hsla(0., 0., 1., 0.15)).cursor_pointer().text_color(white()).child("âˆ’ 0.05").on_click(cx.listener(|t, _, _, cx| t.player.update(cx, |p, cx| { let s = p.speed; p.set_speed(s - 0.05); cx.notify() }))))
                         .child(div().text_color(white()).text_sm().child(format!("{:.2}x", cur)))
                         .child(div().id("s-inc").px_3().py_1().rounded_md().bg(hsla(0., 0., 1., 0.15)).cursor_pointer().text_color(white()).child("+ 0.05").on_click(cx.listener(|t, _, _, cx| t.player.update(cx, |p, cx| { let s = p.speed; p.set_speed(s + 0.05); cx.notify() })))),
                 );
@@ -1965,115 +1980,45 @@ impl PlayerView {
             }
             Menu::ReadAhead => {
                 let cur = store::settings_snapshot().read_ahead_mb;
-                let b = self.cache_bounds.clone();
-                let f = ((cur.clamp(16, 768) - 16) as f32) / (768.0 - 16.0);
-                panel = panel.child(header("Read ahead", cx));
+                panel = panel.child(header(&format!("Read ahead ({cur} MB)"), cx));
                 panel = panel.child(
                     div()
                         .px_3()
-                        .pb_2()
+                        .pb_3()
                         .flex()
-                        .flex_col()
+                        .items_center()
                         .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().text_xs().text_color(hsla(0., 0., 1., 0.7)).child("MB kept past the playhead"))
-                                .child(div().text_sm().text_color(white()).child(format!("{cur} MB"))),
-                        )
-                        .child(
-                            div()
-                                .id("ra-slider")
-                                .relative()
-                                .h(px(18.))
-                                .cursor_pointer()
-                                .child(canvas(move |bnd, _, _| b.set(bnd), |_, _, _, _| {}).absolute().size_full())
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top(px(7.))
-                                        .left_0()
-                                        .right_0()
-                                        .h(px(4.))
-                                        .rounded_full()
-                                        .bg(hsla(0., 0., 1., 0.3))
-                                        .child(div().h_full().rounded_full().w(relative(f)).bg(white())),
-                                )
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    let f = Self::frac_in(this.cache_bounds.get(), ev.position.x);
-                                    let mb = (16.0 + f as f64 * (768.0 - 16.0)).round() as u32;
-                                    store::update_settings(|s| s.read_ahead_mb = mb.clamp(16, 4096));
-                                    crate::player::controller::apply_read_ahead(cx);
-                                    cx.notify();
-                                })),
-                        ),
+                        .child(div().w(px(96.)).px_3().py_1().rounded_lg().border_1().border_color(hsla(0., 0., 1., 0.2)).bg(hsla(0., 0., 0., 0.25)).child(Input::new(&self.ra_input).appearance(false)))
+                        .child(div().text_xs().text_color(hsla(0., 0., 1., 0.6)).child("MB"))
+                        .child(div().id("ra-apply").flex().items_center().px_3().h_8().rounded_lg().bg(hsla(0., 0., 1., 0.15)).cursor_pointer().text_sm().text_color(white()).child("Apply").on_click(cx.listener(|t, _, window, cx| {
+                            let mb = t.ra_input.read(cx).value().trim().parse::<u32>().unwrap_or(96).clamp(16, 4096);
+                            store::update_settings(|s| s.read_ahead_mb = mb);
+                            crate::player::controller::apply_read_ahead(cx);
+                            t.ra_input.update(cx, |i, cx| i.set_value(mb.to_string(), window, cx));
+                            cx.notify();
+                        }))),
                 );
-                for mb in [48u32, 96, 192, 384, 768] {
-                    panel = panel.child(row(SharedString::from(format!("ra-{mb}")), None, format!("{mb} MB"), None, cur == mb).on_click(cx.listener(move |t, _, _, cx| {
-                        t.menu = None;
-                        store::update_settings(|s| s.read_ahead_mb = mb);
-                        crate::player::controller::apply_read_ahead(cx);
-                    })));
-                }
             }
             Menu::ReadBack => {
                 let cur = store::settings_snapshot().read_ahead_back_mb;
-                let b = self.cache_bounds.clone();
-                let f = (cur.clamp(0, 512) as f32) / 512.0;
-                panel = panel.child(header("Back cache", cx));
+                panel = panel.child(header(&format!("Back cache ({cur} MB)"), cx));
                 panel = panel.child(
                     div()
                         .px_3()
-                        .pb_2()
+                        .pb_3()
                         .flex()
-                        .flex_col()
+                        .items_center()
                         .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().text_xs().text_color(hsla(0., 0., 1., 0.7)).child("Already-played video kept in memory"))
-                                .child(div().text_sm().text_color(white()).child(format!("{cur} MB"))),
-                        )
-                        .child(
-                            div()
-                                .id("rb-slider")
-                                .relative()
-                                .h(px(18.))
-                                .cursor_pointer()
-                                .child(canvas(move |bnd, _, _| b.set(bnd), |_, _, _, _| {}).absolute().size_full())
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top(px(7.))
-                                        .left_0()
-                                        .right_0()
-                                        .h(px(4.))
-                                        .rounded_full()
-                                        .bg(hsla(0., 0., 1., 0.3))
-                                        .child(div().h_full().rounded_full().w(relative(f)).bg(white())),
-                                )
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    let f = Self::frac_in(this.cache_bounds.get(), ev.position.x);
-                                    let mb = (f as f64 * 512.0).round() as u32;
-                                    store::update_settings(|s| s.read_ahead_back_mb = mb.clamp(0, 512));
-                                    crate::player::controller::apply_read_ahead(cx);
-                                    cx.notify();
-                                })),
-                        ),
+                        .child(div().w(px(96.)).px_3().py_1().rounded_lg().border_1().border_color(hsla(0., 0., 1., 0.2)).bg(hsla(0., 0., 0., 0.25)).child(Input::new(&self.rb_input).appearance(false)))
+                        .child(div().text_xs().text_color(hsla(0., 0., 1., 0.6)).child("MB"))
+                        .child(div().id("rb-apply").flex().items_center().px_3().h_8().rounded_lg().bg(hsla(0., 0., 1., 0.15)).cursor_pointer().text_sm().text_color(white()).child("Apply").on_click(cx.listener(|t, _, window, cx| {
+                            let mb = t.rb_input.read(cx).value().trim().parse::<u32>().unwrap_or(24).clamp(0, 4096);
+                            store::update_settings(|s| s.read_ahead_back_mb = mb);
+                            crate::player::controller::apply_read_ahead(cx);
+                            t.rb_input.update(cx, |i, cx| i.set_value(mb.to_string(), window, cx));
+                            cx.notify();
+                        }))),
                 );
-                for mb in [8u32, 24, 64, 128, 256] {
-                    panel = panel.child(row(SharedString::from(format!("rb-{mb}")), None, format!("{mb} MB"), None, cur == mb).on_click(cx.listener(move |t, _, _, cx| {
-                        t.menu = None;
-                        store::update_settings(|s| s.read_ahead_back_mb = mb);
-                        crate::player::controller::apply_read_ahead(cx);
-                    })));
-                }
             }
         }
         div()

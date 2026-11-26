@@ -10,6 +10,7 @@ pub struct SocialPage {
     add_id: Entity<InputState>,
     add_name: Entity<InputState>,
     show_codes: bool,
+    show_conn: bool,
 }
 
 impl SocialPage {
@@ -32,7 +33,7 @@ impl SocialPage {
         });
         let add_id = cx.new(|cx| InputState::new(window, cx).placeholder("friend code"));
         let add_name = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
-        Self { relay, token, name, add_id, add_name, show_codes: false }
+        Self { relay, token, name, add_id, add_name, show_codes: false, show_conn: false }
     }
 }
 
@@ -119,44 +120,70 @@ impl Render for SocialPage {
         };
 
         // connection
+        let show_fields = self.show_conn || snap.status == room::Status::Offline;
         let mut conn = card(p)
-            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Social"))
-            .child(div().text_sm().text_color(p.text2).child("One peer hosts; everyone follows. Small relay only — video never passes through it."))
-            .child(
-                div()
-                    .flex()
-                    .items_end()
-                    .gap_3()
-                    .child(field("Relay (host:port)", &self.relay, 220., p))
-                    .child(field("Token", &self.token, 180., p))
-                    .child(field("Your name", &self.name, 140., p))
-                    .child(
-                        button("room-connect", if snap.status == room::Status::Offline { "Connect" } else { "Reconnect" }, p, true)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                let relay = this.relay.read(cx).value().trim().to_string();
-                                let token = this.token.read(cx).value().trim().to_string();
-                                let name = this.name.read(cx).value().trim().to_string();
-                                room::save_settings(relay, token, name, cx);
-                                room::connect(cx);
-                                cx.notify();
-                            })),
-                    )
-                    .when(snap.status != room::Status::Offline, |d| {
-                        d.child(button("room-off", "Disconnect", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                            room::disconnect(cx);
-                            cx.notify();
-                        })))
-                    }),
-            )
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(dot(snap.status != room::Status::Offline, p))
-                    .child(div().text_sm().text_color(status_color).child(status.to_string()))
-                    .when_some(snap.error.clone(), |d, e| d.child(div().text_xs().text_color(rgb(0xff4e45)).child(e))),
-            );
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Social"))
+                            .child(div().text_xs().text_color(p.text2).child(if snap.status == room::Status::Offline {
+                                "Connect to your relay to see friends".to_string()
+                            } else {
+                                format!("{} as {}", snap.cfg.relay, snap.cfg.name)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(snap.status != room::Status::Offline, |d| {
+                                d.child(button("social-conn-toggle", if self.show_conn { "Hide connection" } else { "Connection" }, p, false).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.show_conn = !this.show_conn;
+                                        cx.notify();
+                                    }),
+                                ))
+                            })
+                            .when(snap.status != room::Status::Offline, |d| {
+                                d.child(button("room-off", "Disconnect", p, false).on_click(cx.listener(|_, _, _w, cx| {
+                                    room::disconnect(cx);
+                                    cx.notify();
+                                })))
+                            })
+                            .child(dot(snap.status != room::Status::Offline, p))
+                            .child(div().text_sm().text_color(status_color).child(status.to_string())),
+                    ),
+            )
+            .when(show_fields, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap_3()
+                        .child(field("Relay (host:port)", &self.relay, 220., p))
+                        .child(field("Token", &self.token, 180., p))
+                        .child(field("Your name", &self.name, 140., p))
+                        .child(
+                            button("room-connect", if snap.status == room::Status::Offline { "Connect" } else { "Reconnect" }, p, true)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    let relay = this.relay.read(cx).value().trim().to_string();
+                                    let token = this.token.read(cx).value().trim().to_string();
+                                    let name = this.name.read(cx).value().trim().to_string();
+                                    room::save_settings(relay, token, name, cx);
+                                    room::connect(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .when_some(snap.error.clone(), |d, e| d.child(div().text_xs().text_color(rgb(0xff4e45)).child(e)));
 
         // my friend code, hidden until asked for
         let mut code_row = div()
@@ -285,6 +312,29 @@ impl Render for SocialPage {
             );
         }
 
+        let mut rooms = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Friends' rooms"));
+        if snap.rooms.is_empty() {
+            rooms = rooms.child(div().text_sm().text_color(p.text3).child("No friend is hosting a room right now."));
+        }
+        for r in snap.rooms.clone() {
+            let (room_id, host) = (r.room.clone(), r.host.clone());
+            rooms = rooms.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .h(px(34.))
+                    .child(dot(true, p))
+                    .child(div().flex_1().min_w_0().text_sm().text_color(p.text).truncate().child(format!("{}'s room", r.host_name)))
+                    .child(button(SharedString::from(format!("social-join-{}", r.host)), "Join", p, true).on_click(
+                        cx.listener(move |_, _, _w, cx| {
+                            room::join_room(cx, room_id.clone(), host.clone());
+                            cx.notify();
+                        }),
+                    )),
+            );
+        }
+
         let direct: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.action == "share" && !a.general).take(12).cloned().collect();
         let general: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.action != "share" || a.general).take(20).cloned().collect();
 
@@ -328,6 +378,7 @@ impl Render for SocialPage {
                             .w_full()
                             .max_w(px(760.))
                             .child(conn)
+                            .child(rooms)
                             .child(friends)
                             .child(room_card)
                             .child(shared)

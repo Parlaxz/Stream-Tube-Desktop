@@ -374,11 +374,7 @@ pub fn open_room(cx: &mut App) {
 /// Shows Settings in its own tab (reusing an open one), leaving the video tab
 /// alone instead of replacing it.
 pub fn open_settings(cx: &mut App) {
-    // keep watching in PiP while Settings opens in its own tab
-    let already = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()).map(|a| matches!(&a.read(cx).route, Route::Settings)).unwrap_or(false);
-    if !already && crate::player::controller::player(cx).read(cx).video.is_some() {
-        crate::ui::pip::open(cx);
-    }
+    // Settings gets its own tab (or the open one). The video tab keeps playing.
     let pip = crate::ui::pip::handle(cx);
     let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
     let _ = win.update(cx, |_, window, cx| {
@@ -715,10 +711,13 @@ struct TabDrag {
     icon: &'static str,
 }
 
-/// Ghost shown under the pointer while a tab is dragged.
+/// Ghost shown under the pointer while a tab is dragged. GPUI places its
+/// top-left where the grab point was; the margin below re-centres it on the
+/// pointer instead.
 struct TabDragView {
     label: SharedString,
     icon: &'static str,
+    offset: Point<Pixels>,
 }
 
 impl Render for TabDragView {
@@ -731,6 +730,8 @@ impl Render for TabDragView {
             .h(px(30.))
             .px_3()
             .w(px(200.))
+            .ml(self.offset.x - px(100.))
+            .mt(self.offset.y - px(15.))
             .rounded_lg()
             .bg(p.surface2)
             .shadow_md()
@@ -852,6 +853,8 @@ pub struct AppView {
     tab_grid_group: Option<u64>,
     tab_grid_cols: u32,
     tab_sort: String,
+    /// group pill under a dragged tab (0 = the All pill)
+    drag_hover_group: Option<u64>,
     _subs: Vec<Subscription>,
 }
 
@@ -909,6 +912,19 @@ impl AppView {
                     }
                 }
                 cx.notify();
+            }
+        }));
+        subs.push(cx.subscribe_in(&group_name, window, |this: &mut Self, state, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                let Some(gid) = this.editing_group else { return };
+                let name = state.read(cx).value().trim().to_string();
+                if !name.is_empty() {
+                    if let Some(g) = this.groups.iter_mut().find(|g| g.id == gid) {
+                        g.name = name;
+                    }
+                    this.save_tabs(cx);
+                    cx.notify();
+                }
             }
         }));
         // a YouTube link passed on the command line opens directly, instead of restoring tabs
@@ -1046,8 +1062,8 @@ impl AppView {
             // X hides to the tray; only the tray's Exit really closes the app
             !crate::tray::hide_to_tray(window)
         });
-        let mini_view = cx.new(|cx| PlayerView::new(p.clone(), true, cx));
-        let main_view = cx.new(|cx| PlayerView::new(p.clone(), false, cx));
+        let mini_view = cx.new(|cx| PlayerView::new(p.clone(), true, window, cx));
+        let main_view = cx.new(|cx| PlayerView::new(p.clone(), false, window, cx));
         let preview_view = cx.new(crate::player::preview::PreviewView::new);
         let images = crate::ui::image_cache::init(cx);
         // re-render (to add or drop the preview layer) only when a preview starts or ends
@@ -1119,6 +1135,7 @@ impl AppView {
             tab_grid_group: None,
             tab_grid_cols: store::kv_get("tab_grid_cols").and_then(|s| s.parse().ok()).unwrap_or(6),
             tab_sort: store::kv_get("tab_sort").unwrap_or_else(|| "manual".into()),
+            drag_hover_group: None,
             focus,
             pending_watch_sync: None,
             login: LoginFlow::default(),
@@ -1651,7 +1668,8 @@ impl AppView {
         self.next_tab_id += 1;
         let player = crate::player::controller::create(cx);
         // right after the current tab, like a browser
-        let at = self.active_tab + 1;
+        // a room tab always sits right after the pinned Home tab
+        let at = if matches!(&route, Route::Room) { 1.min(self.tabs.len()) } else { self.active_tab + 1 };
         self.tabs.insert(at, Tab { id, route, title, channel, page: None, history: Vec::new(), forward: Vec::new(), player, group: None });
         if switch {
             self.switch_tab(at, window, cx);
@@ -1778,6 +1796,9 @@ impl AppView {
     /// Live drag-to-reorder: when the pointer enters another tab, the dragged
     /// tab takes its place. Works for the horizontal rail and the grid alike.
     fn drag_reorder(&mut self, drag_id: u64, target_id: u64, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.drag_hover_group.take().is_some() {
+            cx.notify();
+        }
         if !bounds.contains(&position) {
             return;
         }
@@ -1837,11 +1858,13 @@ impl AppView {
             .flex_1()
             .min_w_0()
             .overflow_x_scroll();
-        // Group pills sit at the head of the tab rail; drop a tab on one to file it.
+        // Group pills: collected here, inserted right after the Home tab below.
+        let mut group_pills: std::collections::HashMap<u64, AnyElement> = std::collections::HashMap::new();
+        let mut rail_tabs: Vec<Option<AnyElement>> = (0..self.tabs.len()).map(|_| None).collect();
         for g in self.groups.clone() {
             let gid = g.id;
             let icon_color: Hsla = rgb(g.color).into();
-            tabs = tabs.child(
+            group_pills.insert(gid,
                 div()
                     .id(("rail-g", gid))
                     .flex()
@@ -1854,6 +1877,7 @@ impl AppView {
                     .bg(p.surface2)
                     .cursor_pointer()
                     .hover(move |d| d.bg(p.hover))
+                    .when(self.drag_hover_group == Some(gid), |d| d.border_2().border_color(p.accent))
                     .child(icon(&g.icon).size_4().text_color(icon_color))
                     .child(div().text_sm().text_color(p.text).child(g.name.clone()))
                     .child(icon(if g.collapsed { "chevron-right" } else { "chevron-down" }).size_3().text_color(p.text2))
@@ -1865,8 +1889,14 @@ impl AppView {
                         cx.notify();
                     }))
                     .on_aux_click(cx.listener(move |this, _, window, cx| this.open_group_editor(gid, window, cx)))
-                    .on_drop::<TabDrag>(cx.listener(move |this, drag: &TabDrag, _, cx| this.assign_group(drag.id, Some(gid), cx))),
-            );
+                    .on_drag_move::<TabDrag>(cx.listener(move |this, _, _, cx| {
+                        if this.drag_hover_group != Some(gid) {
+                            this.drag_hover_group = Some(gid);
+                            cx.notify();
+                        }
+                    }))
+                    .on_drop::<TabDrag>(cx.listener(move |this, drag: &TabDrag, _, cx| this.assign_group(drag.id, Some(gid), cx)))
+                    .into_any_element());
         }
         for i in 0..self.tabs.len() {
             if i != self.active_tab {
@@ -1925,8 +1955,8 @@ impl AppView {
                     }),
                 )
                 .when(!pinned, |d| {
-                    d.on_drag(TabDrag { id, label: label.clone().into(), icon: Self::tab_icon(&route) }, |d: &TabDrag, _, _, cx| {
-                        cx.new(|_| TabDragView { label: d.label.clone(), icon: d.icon })
+                    d.on_drag(TabDrag { id, label: label.clone().into(), icon: Self::tab_icon(&route) }, |d: &TabDrag, offset, _, cx| {
+                        cx.new(move |_| TabDragView { label: d.label.clone(), icon: d.icon, offset })
                     })
                     .on_drag_move::<TabDrag>(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
                         // the tab grid overlays the rail; only its items reorder while it is open
@@ -1986,8 +2016,45 @@ impl AppView {
                     .build(window, cx)
                 });
             }
-            tabs = tabs.child(tab);
+            rail_tabs[i] = Some(tab.into_any_element());
         }
+        // Home first, then each group as a bordered collapsible strip, then
+        // the ungrouped tabs.
+        let mut rail = tabs;
+        if let Some(home) = rail_tabs.get_mut(0).and_then(|x| x.take()) {
+            rail = rail.child(home);
+        }
+        for g in self.groups.clone() {
+            let Some(pill) = group_pills.remove(&g.id) else { continue };
+            let border: Hsla = rgb(g.color).into();
+            let mut strip = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .p_0p5()
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .child(pill);
+            if !g.collapsed {
+                for i in 1..self.tabs.len() {
+                    if self.tabs[i].group == Some(g.id) {
+                        if let Some(el) = rail_tabs.get_mut(i).and_then(|x| x.take()) {
+                            strip = strip.child(el);
+                        }
+                    }
+                }
+            }
+            rail = rail.child(strip);
+        }
+        for i in 1..self.tabs.len() {
+            if self.tabs[i].group.is_none() {
+                if let Some(el) = rail_tabs.get_mut(i).and_then(|x| x.take()) {
+                    rail = rail.child(el);
+                }
+            }
+        }
+        tabs = rail;
         let plus = div()
             .id("tab-new")
             .flex()
@@ -2058,6 +2125,7 @@ impl AppView {
     }
 
     fn assign_group(&mut self, tab_id: u64, group: Option<u64>, cx: &mut Context<Self>) {
+        self.drag_hover_group = None;
         if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             t.group = group;
         }
@@ -2077,6 +2145,19 @@ impl AppView {
         window.focus(&fh, cx);
         self.save_tabs(cx);
         cx.notify();
+    }
+
+    /// Saves the name currently typed in the group editor.
+    fn save_group_name(&mut self, cx: &mut Context<Self>) {
+        let Some(gid) = self.editing_group else { return };
+        let name = self.group_name.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
+            g.name = name;
+        }
+        self.save_tabs(cx);
     }
 
     fn open_group_editor(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -2149,6 +2230,9 @@ impl AppView {
             let mut order: Vec<usize> = (0..self.tabs.len()).collect();
             if let Some(gid) = self.tab_grid_group {
                 order.retain(|&i| self.tabs[i].group == Some(gid));
+            } else {
+                // "All" holds the ungrouped tabs; groups have their own pills
+                order.retain(|&i| self.tabs[i].group.is_none());
             }
             let video_of = |i: usize| self.tabs[i].player.read(cx).video.clone();
             match self.tab_sort.as_str() {
@@ -2273,8 +2357,8 @@ impl AppView {
                     }))
                     // the pinned Home tab stays first, so it does not drag
                     .when(id != 0, |d| {
-                        d.on_drag(TabDrag { id, label: drag_label, icon: icon_name }, |d: &TabDrag, _, _, cx| {
-                            cx.new(|_| TabDragView { label: d.label.clone(), icon: d.icon })
+                        d.on_drag(TabDrag { id, label: drag_label, icon: icon_name }, |d: &TabDrag, offset, _, cx| {
+                            cx.new(move |_| TabDragView { label: d.label.clone(), icon: d.icon, offset })
                         })
                         .on_drag_move::<TabDrag>(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _, cx| {
                             let Some(drag_id) = ev.dragged_item().downcast_ref::<TabDrag>().map(|d| d.id) else { return };
@@ -2297,7 +2381,8 @@ impl AppView {
                                         .absolute()
                                         .top_1()
                                         .right_1()
-                                        .bg(p.surface)
+                                        .bg(hsla(0., 0., 0., 0.45))
+                                        .hover(|s| s.bg(hsla(0., 0., 0., 0.7)))
                                         .active(|s| s.bg(p.accent))
                                         .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(t("Close tab")).build(window, cx))
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2318,7 +2403,12 @@ impl AppView {
                             )
                             .into_any_element()
                         } else {
-                            card.into_any_element()
+                            card.with_animation(
+                                SharedString::from(format!("tg-move-{id}-{}", tab.group.unwrap_or(0))),
+                                Animation::new(std::time::Duration::from_millis(180)).with_easing(ease_out_quint()),
+                                |card, delta| card.opacity(0.35 + 0.65 * delta),
+                            )
+                            .into_any_element()
                         }
                     }),
             );
@@ -2341,11 +2431,18 @@ impl AppView {
             pill_base(div().id("tg-g-all"))
                 .bg(if self.tab_grid_group.is_none() { p.accent } else { p.chip })
                 .text_color(if self.tab_grid_group.is_none() { white() } else { p.text })
+                .when(self.drag_hover_group == Some(0), |d| d.border_2().border_color(p.accent))
                 .child(icon("layout-grid").size_4())
                 .child("All")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.tab_grid_group = None;
                     cx.notify();
+                }))
+                .on_drag_move::<TabDrag>(cx.listener(|this, _, _, cx| {
+                    if this.drag_hover_group != Some(0) {
+                        this.drag_hover_group = Some(0);
+                        cx.notify();
+                    }
                 }))
                 .on_drop::<TabDrag>(cx.listener(|this, drag: &TabDrag, _, cx| this.assign_group(drag.id, None, cx))),
         );
@@ -2357,6 +2454,7 @@ impl AppView {
                 pill_base(div().id(("tg-g", gid)))
                     .bg(if selected { p.accent } else { p.chip })
                     .text_color(if selected { white() } else { p.text })
+                    .when(self.drag_hover_group == Some(gid), |d| d.border_2().border_color(p.accent))
                     .child(icon(&g.icon).size_4().text_color(if selected { white() } else { icon_color }))
                     .child(g.name.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2364,6 +2462,12 @@ impl AppView {
                         cx.notify();
                     }))
                     .on_aux_click(cx.listener(move |this, _, window, cx| this.open_group_editor(gid, window, cx)))
+                    .on_drag_move::<TabDrag>(cx.listener(move |this, _, _, cx| {
+                        if this.drag_hover_group != Some(gid) {
+                            this.drag_hover_group = Some(gid);
+                            cx.notify();
+                        }
+                    }))
                     .on_drop::<TabDrag>(cx.listener(move |this, drag: &TabDrag, _, cx| this.assign_group(drag.id, Some(gid), cx))),
             );
         }
@@ -2599,6 +2703,7 @@ impl AppView {
                                 .cursor_pointer()
                                 .child("Done")
                                 .on_click(cx.listener(|this, _, _, cx| {
+                                    this.save_group_name(cx);
                                     this.editing_group = None;
                                     cx.notify();
                                 })),
@@ -2650,23 +2755,18 @@ impl AppView {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .justify_between()
+                                            .gap_3()
                                             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(format!("Tabs ({n})")))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .child(columns_pill)
-                                                    .child(sort_pill)
-                                                    .child(icon_button("tg-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
-                                                        this.tab_grid_open = false;
-                                                        this.editing_group = None;
-                                                        cx.notify();
-                                                    }))),
-                                            ),
+                                            .child(group_row)
+                                            .child(columns_pill)
+                                            .child(sort_pill)
+                                            .child(div().flex_1())
+                                            .child(icon_button("tg-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
+                                                this.tab_grid_open = false;
+                                                this.editing_group = None;
+                                                cx.notify();
+                                            }))),
                                     )
-                                    .child(group_row)
                                     .child(nv_row)
                                     .child(content),
                             ),

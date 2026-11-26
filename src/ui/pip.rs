@@ -59,10 +59,10 @@ pub fn open(cx: &mut App) {
         window_min_size: Some(gpui_kit::size(px(256.), px(144.))),
         ..Default::default()
     };
-    let res = gpui_kit::open_window(opts, cx, |_window, cx| {
+    let res = gpui_kit::open_window(opts, cx, |window, cx| {
         let pl = player(cx);
         let view = cx.new(|cx| {
-            let mut v = PlayerView::new(pl, false, cx);
+            let mut v = PlayerView::new(pl, false, window, cx);
             v.pip = true;
             v
         });

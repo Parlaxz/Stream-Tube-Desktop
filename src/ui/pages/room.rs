@@ -62,9 +62,26 @@ impl Render for RoomPage {
         let p = pal(cx);
         let snap = room::snapshot(cx);
         let pe = crate::ui::app::room_player(cx).unwrap_or_else(|| player(cx));
-        let (queue, qpos) = {
+        let (queue, qpos, current) = {
             let r = pe.read(cx);
-            (r.queue.clone(), r.queue_pos)
+            (r.queue.clone(), r.queue_pos, r.video.clone())
+        };
+
+        let now_playing = if let Some(v) = &current {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.text)
+                        .child(crate::ui::widgets::selectable_text(format!("room-vt-{}", v.id), v.title.clone())),
+                )
+                .child(div().text_xs().text_color(p.text2).child(v.channel_name.clone()))
+        } else {
+            div().text_sm().text_color(p.text2).child("Nothing is playing. Add a video below, or use Add to room on any video.")
         };
 
         let header = if let Some(info) = &snap.room {
@@ -168,6 +185,7 @@ impl Render for RoomPage {
                     .gap_4()
                     .p_6()
                     .max_w(px(860.))
+                    .child(now_playing)
                     .child(header)
                     .child(add_row)
                     .child(

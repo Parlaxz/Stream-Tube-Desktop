@@ -673,6 +673,7 @@ impl WatchPage {
         let v_save = video_item.clone();
         let v_more = video_item.clone();
         let v_room = video_item.clone();
+        let v_share = video_item.clone();
         let v_like = video_item.clone();
         let v_dis = video_item.clone();
         let share_id = w.id.clone();
@@ -825,8 +826,14 @@ impl WatchPage {
                                         d.child(div().mx_4().mt_1().h(px(2.)).rounded_full().bg(p.text3).child(div().h_full().w(relative(r)).bg(p.text)))
                                     }),
                             )
-                            .child(pill("w-share", Some("share-2"), "Share", cx).on_click(move |_, _, cx| {
-                                copy_to_clipboard(format!("https://youtu.be/{share_id}"), cx)
+                            .child(pill("w-share", Some("share-2"), "Share", cx).on_click(move |ev, window, cx| {
+                                let url = format!("https://youtu.be/{share_id}");
+                                let video = v_share.clone();
+                                let items = vec![
+                                    crate::ui::app::MenuItem::new("link", "Copy link", move |_, cx| copy_to_clipboard(url.clone(), cx)),
+                                    crate::ui::app::MenuItem::new("users", "Share with friends", move |_, cx| crate::room::share_all(video.clone(), cx)),
+                                ];
+                                crate::ui::app::open_menu(ev.position(), items, window, cx);
                             }))
                             .when(crate::room::in_room(cx), |d| {
                                 d.child(pill("w-room", Some("users"), "Add to room", cx).on_click(move |_, _, cx| {

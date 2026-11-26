@@ -5,6 +5,8 @@ use crate::ui::widgets::*;
 use crate::ui::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 
+const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
+
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
     General,
@@ -1437,10 +1439,16 @@ impl SettingsPage {
     }
 
     fn about(&self, cx: &mut Context<Self>) -> Div {
+        let p = pal(cx);
         let s = store::settings_snapshot();
         let mpv = crate::player::mpv::available();
-        card(cx)
-            .child(row("Stream Tube", &tf!("Version {0}", env!("CARGO_PKG_VERSION")), div(), cx))
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                card(cx)
+                    .child(row("Stream Tube", &tf!("Version {0}", env!("CARGO_PKG_VERSION")), div(), cx))
             .child(row("Video engine", if mpv { "libmpv" } else if cfg!(windows) { "libmpv-2.dll not found" } else { "libmpv not found (install the libmpv package)" }, div(), cx))
             .child(row("yt-dlp", self.ytdlp_version.as_deref().unwrap_or("not installed"), div(), cx))
             .child({
@@ -1463,8 +1471,13 @@ impl SettingsPage {
             .child(row("Check for updates at startup", "", switch("upd-auto", s.check_updates, |s, v| s.check_updates = v, cx), cx))
             .child(row("Releases", "Changelog and downloads on GitHub", pill("upd-page", Some("external-link"), "Open", cx).on_click(|_, _, _| {
                 let _ = open::that(crate::updater::RELEASES_PAGE);
-            }), cx))
-
+            }), cx)),
+            )
+            .child(
+                card(cx)
+                    .child(div().pt_2().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Changelog"))
+                    .child(rich_text("about-changelog", CHANGELOG.to_string(), cx)),
+            )
     }
 }
 

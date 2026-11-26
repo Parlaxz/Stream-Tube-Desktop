@@ -1421,6 +1421,8 @@ impl Player {
         eprintln!("[VOL] set_volume raw={v} old={}", self.volume);
         self.volume = v;
         if let Some(m) = &self.mpv {
+            // mpv caps the volume property at volume-max (default 130%)
+            m.set_f64("volume-max", self.max_volume());
             m.set_f64("volume", v);
             if self.muted && v > 0.0 {
                 m.set_flag("mute", false);

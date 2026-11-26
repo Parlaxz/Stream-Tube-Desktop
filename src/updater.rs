@@ -26,6 +26,8 @@ pub struct Release {
     pub prerelease: bool,
     /// installer (Windows) or archive (Linux) for this platform
     pub asset: Option<Asset>,
+    /// exe patch for this build's version → this release, when published
+    pub patch: Option<Asset>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +89,24 @@ pub fn is_newer(tag: &str, current: &str) -> bool {
     parse_version(tag) > parse_version(current)
 }
 
+fn asset_from(a: &Value) -> Option<Asset> {
+    let name = a.get("name")?.as_str()?;
+    let url = a.get("browser_download_url")?.as_str()?;
+    // only files of this project's releases, saved under a plain file name
+    let plain = !name.is_empty() && !name.contains(['/', '\\', ':']) && !name.starts_with('.');
+    let ours = RELEASE_REPOS.iter().any(|repo| url.starts_with(&format!("https://github.com/{repo}/releases/download/")));
+    if !plain || !ours {
+        return None;
+    }
+    let sha256 = a
+        .get("digest")
+        .and_then(Value::as_str)
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase);
+    Some(Asset { name: name.to_string(), url: url.to_string(), size: a.get("size").and_then(Value::as_u64).unwrap_or(0), sha256 })
+}
+
 fn pick_asset(assets: &[Value]) -> Option<Asset> {
     let want = |name: &str| {
         let n = name.to_ascii_lowercase();
@@ -98,23 +118,19 @@ fn pick_asset(assets: &[Value]) -> Option<Asset> {
     };
     assets.iter().find_map(|a| {
         let name = a.get("name")?.as_str()?;
-        if !want(name) {
-            return None;
+        if want(name) {
+            asset_from(a)
+        } else {
+            None
         }
-        let url = a.get("browser_download_url")?.as_str()?;
-        // only files of this project's releases, saved under a plain file name
-        let plain = !name.is_empty() && !name.contains(['/', '\\', ':']) && !name.starts_with('.');
-        let ours = RELEASE_REPOS.iter().any(|repo| url.starts_with(&format!("https://github.com/{repo}/releases/download/")));
-        if !plain || !ours {
-            return None;
-        }
-        let sha256 = a
-            .get("digest")
-            .and_then(Value::as_str)
-            .and_then(|d| d.strip_prefix("sha256:"))
-            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map(str::to_ascii_lowercase);
-        Some(Asset { name: name.to_string(), url: url.to_string(), size: a.get("size").and_then(Value::as_u64).unwrap_or(0), sha256 })
+    })
+}
+
+fn pick_patch_asset(assets: &[Value], from: &str, to: &str) -> Option<Asset> {
+    let want = format!("streamtube-{from}-to-{to}.patch").to_ascii_lowercase();
+    assets.iter().find_map(|a| {
+        let name = a.get("name")?.as_str()?;
+        (name.to_ascii_lowercase() == want).then(|| asset_from(a)).flatten()
     })
 }
 
@@ -149,13 +165,16 @@ pub fn check() -> Result<Option<Release>> {
         return Ok(None);
     }
     let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let assets = r.get("assets").and_then(Value::as_array).cloned().unwrap_or_default();
+    let to = tag.trim_start_matches(['v', 'V']);
     Ok(Some(Release {
         name: Some(s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| tag.clone()),
+        patch: pick_patch_asset(&assets, current_version(), to),
         tag,
         notes: s("body"),
         page: s("html_url"),
         prerelease: r.get("prerelease").and_then(Value::as_bool).unwrap_or(false),
-        asset: r.get("assets").and_then(Value::as_array).and_then(|a| pick_asset(a)),
+        asset: pick_asset(&assets),
     }))
 }
 
@@ -236,6 +255,16 @@ pub fn install(cx: &mut App) {
         let _ = open::that(&rel.page);
         return;
     }
+    // A delta patch is small; if it is missing or fails, the full installer runs.
+    #[cfg(windows)]
+    if let Some(patch) = rel.patch.clone() {
+        start_patch(patch, rel, cx);
+        return;
+    }
+    install_full(rel, cx);
+}
+
+fn install_full(rel: Release, cx: &mut App) {
     let Some(Asset { name, url, size, sha256 }) = rel.asset.clone().filter(|_| cfg!(windows)) else {
         // no installer for this platform: the release page has the downloads
         let _ = open::that(&rel.page);
@@ -298,6 +327,116 @@ pub fn install(cx: &mut App) {
     .detach();
 }
 
+/// Downloads a patch, applies it to the running exe, and returns the new exe
+/// written beside it. Any failure falls back to the full installer.
+#[cfg(windows)]
+fn start_patch(patch: Asset, rel: Release, cx: &mut App) {
+    set_status(Status::Downloading(rel.clone(), 0.0), cx);
+    let progress = std::sync::Arc::new(parking_lot::Mutex::new(0.0f32));
+    let p2 = progress.clone();
+    let result: std::sync::Arc<parking_lot::Mutex<Option<Result<std::path::PathBuf>>>> = Default::default();
+    let r2 = result.clone();
+    std::thread::spawn(move || {
+        *r2.lock() = Some(apply_delta(&patch, &p2));
+    });
+    cx.spawn(async move |cx| {
+        let res = loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+            if let Some(r) = result.lock().take() {
+                break r;
+            }
+            let p = *progress.lock();
+            let rel2 = rel.clone();
+            cx.update(|cx| set_status(Status::Downloading(rel2, p), cx));
+        };
+        cx.update(|cx| match res {
+            Ok(new_exe) => schedule_swap(new_exe, rel, cx),
+            Err(e) => {
+                toast(cx, tf!("Delta update failed, downloading the full installer: {0}", e));
+                install_full(rel, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+#[cfg(windows)]
+fn apply_delta(patch: &Asset, progress: &std::sync::Arc<parking_lot::Mutex<f32>>) -> Result<std::path::PathBuf> {
+    let dir = store::data_dir().join("update");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(&patch.name);
+    let mut f = std::fs::File::create(&path)?;
+    http::download_to(&patch.url, &mut f, |done, total| {
+        let total = total.unwrap_or(patch.size).max(1);
+        *progress.lock() = (done as f32 / total as f32).min(1.0);
+        true
+    })
+    .context("download failed")?;
+    drop(f);
+    if patch.size > 0 && std::fs::metadata(&path)?.len() != patch.size {
+        anyhow::bail!("the patch download is incomplete");
+    }
+    let Some(want) = &patch.sha256 else {
+        anyhow::bail!("GitHub gave no checksum for the patch");
+    };
+    if file_sha256(&path)? != *want {
+        let _ = std::fs::remove_file(&path);
+        anyhow::bail!("the patch doesn't match the release's checksum");
+    }
+    let exe = std::env::current_exe()?;
+    let old = std::fs::read(&exe)?;
+    let data = std::fs::read(&path)?;
+    let parsed = bidiff::patch::read_patch(&data).context("read patch")?;
+    let base = parsed.verify_base(&old).context("the patch is for another build; using the installer")?;
+    let new_path = exe.with_file_name(format!("streamtube-update-{}.exe", parsed.new_hash().to_hex()));
+    let mut out = std::fs::File::create(&new_path)?;
+    if let Err(e) = base.apply(&mut out) {
+        drop(out);
+        let _ = std::fs::remove_file(&new_path);
+        return Err(anyhow!("apply patch: {e}"));
+    }
+    out.sync_all()?;
+    drop(out);
+    Ok(new_path)
+}
+
+/// Waits for this process to exit, swaps the new exe in, and starts it. The
+/// install folder was already proved writable by writing the new exe there.
+#[cfg(windows)]
+fn schedule_swap(new_exe: std::path::PathBuf, rel: Release, cx: &mut App) {
+    let Ok(exe) = std::env::current_exe() else {
+        let _ = std::fs::remove_file(&new_exe);
+        install_full(rel, cx);
+        return;
+    };
+    let pid = std::process::id();
+    let quote = |p: &std::path::Path| p.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 600; \
+         Move-Item -LiteralPath '{}' -Destination '{}' -Force -ErrorAction SilentlyContinue; \
+         Start-Process -FilePath '{}'",
+        quote(&new_exe),
+        quote(&exe),
+        quote(&exe)
+    );
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+    crate::api::streams::hide_window(&mut cmd);
+    match cmd.spawn() {
+        Ok(_) => {
+            crate::player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
+            store::kv_set("update_skip", "");
+            cx.quit();
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&new_exe);
+            toast(cx, tf!("Could not start the update helper: {0}", e));
+            install_full(rel, cx);
+        }
+    }
+}
+
 fn installer_command(path: &std::path::Path, executable: Option<&std::path::Path>) -> std::process::Command {
     let mut command = std::process::Command::new(path);
     command.args(["/SP-", "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]);
@@ -334,7 +473,7 @@ fn run_installer(path: &std::path::Path, rel: Release, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{installer_command, is_newer, pick_asset};
+    use super::{installer_command, is_newer, pick_asset, pick_patch_asset};
 
     #[test]
     fn portable_update_targets_the_running_copy() {
@@ -379,5 +518,21 @@ mod tests {
         assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProject/Stream-Tube-Desktop/releases/download/v1.0.0/{good}"))]).is_none());
         assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProject/Stream-Tube-Desktop-fork/releases/download/v1.0.0/{good}"))]).is_none());
         assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProjectX/Stream-Tube-Desktop/releases/download/v1.0.0/{good}"))]).is_none());
+    }
+
+    #[test]
+    fn patch_assets_match_the_version_pair() {
+        let name = "streamtube-0.11.1-to-0.11.2.patch";
+        let a = |name: &str| {
+            serde_json::json!({
+                "name": name,
+                "browser_download_url": format!("https://github.com/{}/releases/download/v0.11.2/{name}", super::REPO),
+                "size": 5,
+                "digest": format!("sha256:{}", "AB".repeat(32))
+            })
+        };
+        assert!(pick_patch_asset(&[a(name)], "0.11.1", "0.11.2").is_some());
+        assert!(pick_patch_asset(&[a(name)], "0.11.1", "0.11.3").is_none());
+        assert!(pick_patch_asset(&[a(name)], "0.11.0", "0.11.2").is_none());
     }
 }

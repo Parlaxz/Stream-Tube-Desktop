@@ -32,6 +32,15 @@ if not errorlevel 1 (
   goto :fail
 )
 
+rem Previous release = base for the delta patch. Its exe is cached in dist\exe.
+set "PREV_TAG="
+for /f "delims=" %%i in ('git describe --tags --abbrev=0 2^>nul') do set "PREV_TAG=%%i"
+set "PREV="
+if defined PREV_TAG (
+  set "PREV=%PREV_TAG%"
+  if /i "%PREV_TAG:~0,1%"=="v" set "PREV=%PREV_TAG:~1%"
+)
+
 set "CARGO=cargo"
 where cargo >nul 2>nul || set "CARGO=%USERPROFILE%\.cargo\bin\cargo.exe"
 if not exist "%CARGO%" if /i not "%CARGO%"=="cargo" (
@@ -65,6 +74,20 @@ echo Building release...
 echo Building installer...
 "%ISCC%" /Q "/DAppVersion=%V%" "installer\streamtube.iss" || (git checkout -- Cargo.toml Cargo.lock & goto :fail)
 
+rem Delta patch: previous exe -> new exe (bidiff). Missing base just skips it.
+set "PATCH="
+if defined PREV if exist "dist\exe\streamtube-%PREV%.exe" (
+  echo Building delta patch %PREV% -^> %V%...
+  "%CARGO%" build --release --bin patchgen --features patchgen
+  if not errorlevel 1 (
+    target\release\patchgen.exe diff "dist\exe\streamtube-%PREV%.exe" "target\release\streamtube.exe" "dist\streamtube-%PREV%-to-%V%.patch"
+    if not errorlevel 1 set "PATCH=dist\streamtube-%PREV%-to-%V%.patch"
+  )
+)
+if defined PATCH echo Delta patch: %PATCH%
+if not exist "dist\exe" mkdir "dist\exe"
+copy /Y "target\release\streamtube.exe" "dist\exe\streamtube-%V%.exe" >nul
+
 git add Cargo.toml Cargo.lock
 git commit -m "Version %V%" || goto :fail
 git push origin custom || goto :fail
@@ -81,7 +104,9 @@ set "NOTES=--generate-notes"
 powershell -NoProfile -Command "$v=$env:ST_VERSION; $t=[IO.File]::ReadAllText('CHANGELOG.md'); $m=[regex]::Match($t,'(?ms)^##\s+'+[regex]::Escape($v)+'\s*\r?\n(.*?)(?=^##\s|\z)'); $b=$m.Groups[1].Value.Trim(); if(-not $m.Success -or $b.Length -eq 0){exit 1}; [IO.File]::WriteAllText('dist\release-notes.md',$b,(New-Object System.Text.UTF8Encoding($false)))"
 if not errorlevel 1 set "NOTES=--notes-file dist\release-notes.md"
 
-gh release create "v%V%" "dist\StreamTube-%V%-setup.exe" --repo %REPO% --verify-tag --title "Stream Tube %V%" %NOTES% %LATEST% %PRE% || goto :fail
+set "EXTRA="
+if defined PATCH set "EXTRA=%PATCH%"
+gh release create "v%V%" "dist\StreamTube-%V%-setup.exe" %EXTRA% --repo %REPO% --verify-tag --title "Stream Tube %V%" %NOTES% %LATEST% %PRE% || goto :fail
 
 echo Done: https://github.com/%REPO%/releases/tag/v%V%
 goto :end

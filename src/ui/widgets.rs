@@ -619,7 +619,35 @@ pub fn selectable_text(id: impl Into<ElementId>, text: impl Into<SharedString>) 
         .replace('[', "\\[")
         .replace(']', "\\]")
         .replace('#', "\\#");
-    gpui_kit::base::TextView::markdown(id, escaped).selectable(true).into_any_element()
+    let full = raw.to_string();
+    div()
+        .w_full()
+        .child(gpui_kit::base::TextView::markdown(id, escaped).selectable(true))
+        .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
+            text_menu(full.clone(), Vec::new(), ev, window, cx)
+        })
+        .into_any_element()
+}
+
+/// Right-click menu for selectable text: copy the selection, or all of it.
+fn text_menu(full: String, urls: Vec<String>, ev: &MouseDownEvent, window: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
+    let selected = gpui_kit::base::TextSelection::selected_text(window, cx).trim().to_string();
+    let mut items = Vec::new();
+    if !selected.is_empty() {
+        items.push(crate::ui::app::MenuItem::new("copy", t("Copy selected text"), move |_, cx| {
+            crate::ui::copy_to_clipboard(selected.clone(), cx)
+        }));
+    }
+    items.push(crate::ui::app::MenuItem::new("copy", t("Copy all text"), move |_, cx| {
+        crate::ui::copy_to_clipboard(full.clone(), cx)
+    }));
+    for u in urls.iter().take(3) {
+        let u2 = u.clone();
+        let label = if u.chars().count() > 40 { tf!("Copy link {0}…", u.chars().take(40).collect::<String>()) } else { tf!("Copy link {0}", u) };
+        items.push(crate::ui::app::MenuItem::new("link", label, move |_, cx| crate::ui::copy_to_clipboard(u2.clone(), cx)));
+    }
+    crate::ui::app::open_menu(ev.position, items, window, cx);
 }
 
 /// Selectable text (drag to select, Ctrl+C) with clickable links, timestamps,
@@ -664,21 +692,18 @@ fn render_rich_text(
     };
     let view = gpui_kit::base::TextView::markdown(id, md)
         .selectable(true)
-        .on_link_click(|url, _, window, cx| open_link(url, window, cx));
+        .on_link_click(|url, _, window, cx| {
+            // a drag that selected text must not also open the link
+            if gpui_kit::base::TextSelection::selected_text(window, cx).trim().is_empty() {
+                open_link(url, window, cx);
+            }
+        });
     let copy_text = text;
     div()
         .w_full()
         .child(view)
         .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
-            cx.stop_propagation();
-            let text = copy_text.clone();
-            let mut items = vec![crate::ui::app::MenuItem::new("copy", t("Copy all text"), move |_, cx| crate::ui::copy_to_clipboard(text.clone(), cx))];
-            for u in urls.iter().take(3) {
-                let u2 = u.clone();
-                let label = if u.chars().count() > 40 { tf!("Copy link {0}…", u.chars().take(40).collect::<String>()) } else { tf!("Copy link {0}", u) };
-                items.push(crate::ui::app::MenuItem::new("link", label, move |_, cx| crate::ui::copy_to_clipboard(u2.clone(), cx)));
-            }
-            crate::ui::app::open_menu(ev.position, items, window, cx);
+            text_menu(copy_text.clone(), urls.to_vec(), ev, window, cx)
         })
         .into_any_element()
 }

@@ -105,6 +105,15 @@ pub struct Activity {
     pub at: u64,
 }
 
+/// A room a friend currently hosts, advertised so others can join uninvited.
+#[derive(Clone)]
+pub struct RoomAd {
+    pub room: String,
+    pub host: String,
+    pub host_name: String,
+    pub at: u64,
+}
+
 struct Inner {
     cfg: Config,
     status: Status,
@@ -125,6 +134,8 @@ struct Inner {
     dirty: bool,
     feed: Vec<Activity>,
     unread: u32,
+    rooms: Vec<RoomAd>,
+    rooms_beat: Instant,
 }
 
 impl Inner {
@@ -155,6 +166,8 @@ impl Inner {
             dirty: false,
             feed: Vec::new(),
             unread: 0,
+            rooms: Vec::new(),
+            rooms_beat: Instant::now(),
         }
     }
 }
@@ -192,11 +205,14 @@ pub struct Snapshot {
     pub invite: Option<Invite>,
     pub feed: Vec<Activity>,
     pub unread: u32,
+    pub rooms: Vec<RoomAd>,
 }
 
 pub fn snapshot(cx: &mut App) -> Snapshot {
     let r = cx.default_global::<Room>();
-    let g = r.inner.lock().unwrap();
+    let mut g = r.inner.lock().unwrap();
+    let now = now_secs();
+    g.rooms.retain(|r| now.saturating_sub(r.at) < 60);
     Snapshot {
         cfg: g.cfg.clone(),
         status: g.status,
@@ -207,6 +223,7 @@ pub fn snapshot(cx: &mut App) -> Snapshot {
         invite: g.invite.clone(),
         feed: g.feed.clone(),
         unread: g.unread,
+        rooms: g.rooms.clone(),
     }
 }
 
@@ -349,6 +366,18 @@ pub fn create_room(cx: &mut App) {
             g.last_sent = None;
             g.dirty = true;
             send_now(&g, &format!("JOIN {id}"));
+            let msg = Sync {
+                kind: "room".into(),
+                action: "open".into(),
+                room: id.clone(),
+                host: g.cfg.me.clone(),
+                name: g.cfg.name.clone(),
+                at: now_secs(),
+                speed: 1.0,
+                ..Default::default()
+            };
+            send_to_friends(&g, &msg);
+            g.rooms_beat = Instant::now();
             true
         }
     };
@@ -409,6 +438,21 @@ pub fn leave_room(cx: &mut App) {
     {
         let r = cx.default_global::<Room>();
         let mut g = r.inner.lock().unwrap();
+        if g.host {
+            if let Some(info) = &g.room {
+                let msg = Sync {
+                    kind: "room".into(),
+                    action: "closed".into(),
+                    room: info.id.clone(),
+                    host: g.cfg.me.clone(),
+                    name: g.cfg.name.clone(),
+                    at: now_secs(),
+                    speed: 1.0,
+                    ..Default::default()
+                };
+                send_to_friends(&g, &msg);
+            }
+        }
         if let Some(info) = g.room.take() {
             send_now(&g, &format!("LEAVE {}", info.id));
         }
@@ -877,6 +921,19 @@ fn on_message(cx: &mut App, from: &str, msg: Sync) {
             }
             cx.refresh_windows();
         }
+        "room" => {
+            let host = if msg.host.is_empty() { from.to_string() } else { msg.host.clone() };
+            let host_name = if msg.name.trim().is_empty() { from.chars().take(8).collect::<String>() } else { msg.name.clone() };
+            {
+                let r = cx.default_global::<Room>();
+                let mut g = r.inner.lock().unwrap();
+                g.rooms.retain(|r| r.host != host);
+                if msg.action != "closed" && !msg.room.is_empty() {
+                    g.rooms.push(RoomAd { room: msg.room.clone(), host, host_name, at: now_secs() });
+                }
+            }
+            cx.refresh_windows();
+        }
         "invite" => {
             let inv = Invite { room: msg.room.clone(), host: msg.host.clone(), name: msg.name.clone() };
             let (room, host, who) = (inv.room.clone(), inv.host.clone(), inv.name.clone());
@@ -990,6 +1047,27 @@ fn apply_sync(cx: &mut App, s: &Sync, from_guest: bool) {
 
 fn tick(cx: &mut App) {
     let now = Instant::now();
+    // Hosting: advertise the room to friends so they can join without an invite.
+    {
+        let r = cx.default_global::<Room>();
+        let mut g = r.inner.lock().unwrap();
+        if g.host && g.status == Status::InRoom && now.duration_since(g.rooms_beat) >= Duration::from_secs(10) {
+            if let Some(info) = &g.room {
+                let msg = Sync {
+                    kind: "room".into(),
+                    action: "open".into(),
+                    room: info.id.clone(),
+                    host: g.cfg.me.clone(),
+                    name: g.cfg.name.clone(),
+                    at: now_secs(),
+                    speed: 1.0,
+                    ..Default::default()
+                };
+                send_to_friends(&g, &msg);
+            }
+            g.rooms_beat = now;
+        }
+    }
     // Presence: ask the relay who of our friends is online, every few seconds.
     {
         let r = cx.default_global::<Room>();

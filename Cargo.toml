@@ -5,6 +5,11 @@ edition = "2024"
 description = "A YouTube desktop client in Rust + GPUI with SponsorBlock, DeArrow, RYD, local subscriptions & more"
 license = "MIT"
 
+[features]
+default = []
+# release-time patch generator (see src/bin/patchgen.rs)
+patchgen = ["bidiff/diff"]
+
 [dependencies]
 gpui-kit = "0.10"
 anyhow = "1"
@@ -26,6 +31,8 @@ rand = "0.9"
 open = "5"
 raw-window-handle = "0.6"
 sha1 = "0.11"
+# binary patches for delta updates; 2.0 is not on crates.io yet
+bidiff = { git = "https://github.com/divvun/bidiff", rev = "1447c610101c53b48e56d5414fdf69d90bc74e91", default-features = false, features = ["patch"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # already in the tree through GPUI; used to hide the pointer with the player controls

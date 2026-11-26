@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.11.2
+
+### Tabs
+
+- **Tab groups** sit after Home in the rail as collapsible bordered strips that hold their member tabs. Drag a tab onto a group pill to file it; the pill highlights while you drag. **All** in the tab overview shows only ungrouped tabs, and a card fades when it changes group.
+- Group names save on Enter, on leaving the name box, and on **Done**, and they survive a restart.
+- The tab overview header puts the group pills and the layout/sort controls on one row, removing the empty area left of the badges. Columns cycle **Dynamic → 4 → 6 → 8**; sort cycles **Manual → Length → Recency → Views**.
+- Non-video tabs appear as icon pills under the group row, with the name on hover.
+- The drag ghost is centered on the pointer instead of hanging from the top of the card. The close X on tab thumbnails is translucent.
+
+### Player
+
+- A video keeps playing when you switch tabs or go Home. Starting another video pauses the previous one.
+- **Volume boost** is a toggle that really raises the slider to **500%**; it now raises mpv's `volume-max` instead of only changing the UI.
+- **Read ahead** and **Back cache** are text boxes with an **Apply** button.
+- The top-bar **Settings** button opens Settings in its own tab (or the existing Settings tab) and keeps the video in picture-in-picture. The crash from opening Settings while watching is fixed.
+
+### Rooms and social
+
+- Rooms are advertised to friends. Join a friend's room from **Social → Friends' rooms** without an invite.
+- A room opens in a tab right after Home and shows the current video and the room queue.
+- **Share** is a menu now: **Copy link** or **Share with friends**.
+- The Social page hides connection fields when connected, lists friends' rooms, and stays centered.
+- Selectable titles and comments have a right-click **Copy selected text**. A link does not open when you have selected text.
+
+### Updates
+
+- Updates try a **bidiff delta of `streamtube.exe`** first: about 3.7 MB in testing instead of the 43 MB installer. The patch is checksum-verified, the new exe replaces the old one on restart, and the full installer remains the fallback. `release.bat` builds and uploads the patch.
+
 ## 0.11.1
 
 ### Tabs
