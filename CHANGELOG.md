@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.3
+
+### Fixed
+
+- The top-bar **Settings** button did nothing in 0.11.2. It now opens Settings in its own tab, or switches to the existing Settings tab, and uses the active tab's live route so a stale route cannot swallow the click.
+- A tab's stored route stays current after in-tab navigation, so route-based tab lookups no longer match the wrong tab.
+
+### Updates
+
+- First delta update: 0.11.2 → 0.11.3 ships as a small exe patch, so 0.11.2 can update in place instead of downloading the full installer.
+
 ## 0.11.2
 
 ### Tabs

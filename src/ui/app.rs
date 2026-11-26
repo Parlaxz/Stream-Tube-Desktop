@@ -379,16 +379,7 @@ pub fn open_settings(cx: &mut App) {
     let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
     let _ = win.update(cx, |_, window, cx| {
         let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
-        app.update(cx, |a, cx| {
-            if matches!(&a.route, Route::Settings) {
-                return;
-            }
-            if let Some(i) = a.tabs.iter().position(|t| matches!(&t.route, Route::Settings)) {
-                a.switch_tab(i, window, cx);
-            } else {
-                a.new_tab(Route::Settings, None, None, true, window, cx);
-            }
-        });
+        app.update(cx, |a, cx| a.open_settings_tab(window, cx));
     });
 }
 
@@ -1612,6 +1603,8 @@ impl AppView {
         let page = build_page(&route, window, cx);
         let old_route = std::mem::replace(&mut self.route, route);
         let old_page = std::mem::replace(&mut self.page, page);
+        // keep the active tab's stored route current for lookups by route
+        self.tabs[self.active_tab].route = self.route.clone();
         // Don't keep stale watch pages in history for the same video
         self.history.push((old_route, old_page));
         if self.history.len() > 40 {
@@ -1622,6 +1615,24 @@ impl AppView {
         window.focus(&self.focus, cx);
         self.save_tabs(cx);
         cx.notify();
+    }
+
+    /// Shows Settings in a new tab, or switches to the existing one. Uses the
+    /// live route of the active tab: its stored `route` is only refreshed on a
+    /// tab switch, so a stale Settings route must not turn this into a no-op.
+    fn open_settings_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.route, Route::Settings) {
+            return;
+        }
+        let existing = (0..self.tabs.len()).find(|&i| {
+            let route = if i == self.active_tab { &self.route } else { &self.tabs[i].route };
+            matches!(route, Route::Settings)
+        });
+        if let Some(i) = existing {
+            self.switch_tab(i, window, cx);
+        } else {
+            self.new_tab(Route::Settings, None, None, true, window, cx);
+        }
     }
 
     /// Sidebar navigation: Ctrl/Cmd+left click or a middle click opens the
@@ -2781,6 +2792,7 @@ impl AppView {
             crate::ui::slot::clear_slot(cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
+            self.tabs[self.active_tab].route = self.route.clone();
             self.forward.push((cur_r, cur_p));
             if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
                 toggle_fullscreen(window, cx);
@@ -2803,6 +2815,7 @@ impl AppView {
             crate::ui::slot::clear_slot(cx);
             let cur_r = std::mem::replace(&mut self.route, r);
             let cur_p = std::mem::replace(&mut self.page, p);
+            self.tabs[self.active_tab].route = self.route.clone();
             self.history.push((cur_r, cur_p));
             if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
                 toggle_fullscreen(window, cx);
@@ -3699,7 +3712,7 @@ impl AppView {
                     .children(preserve_btn)
                     .child(self.render_notifications(cx))
                     .child(self.render_dl_button(cx))
-                    .child(icon_button("settings", "settings", cx).on_click(cx.listener(|_, _, _window, cx| open_settings(cx))))
+                    .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.open_settings_tab(window, cx))))
                     .child(self.account_button(cx))
                     .child(drag_gap("drag-c").w_3())
                     .child(window_controls(maximized, cx)),
