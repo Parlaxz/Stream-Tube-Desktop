@@ -130,8 +130,8 @@ pub fn local_hls(url: &str, max_height: u32, fps_pref: u32, audio: Option<&str>)
     let Some(p) = proxy() else { return url.to_string() };
     let id = register(p, url, None, HLS);
     match audio {
-        Some(a) => format!("http://127.0.0.1:{}/h/{id}?max={max_height}&fps={fps_pref}&audio={}", p.port, crate::api::http::urlencode(a)),
-        None => format!("http://127.0.0.1:{}/h/{id}?max={max_height}&fps={fps_pref}", p.port),
+        Some(a) => format!("{}/h/{id}?max={max_height}&fps={fps_pref}&audio={}", p.base(), crate::api::http::urlencode(a)),
+        None => format!("{}/h/{id}?max={max_height}&fps={fps_pref}", p.base()),
     }
 }
 
@@ -749,6 +749,20 @@ mod token_tests {
         let (token, tail) = path.split_once('/').expect("token prefix");
         assert_eq!(token.len(), 48, "48-hex-char session secret");
         assert!(tail.starts_with("p/"), "pass route: {tail}");
+
+        // every route mpv loads must carry the secret, or the router refuses it
+        let path_of = |u: &str| {
+            let rest = u.strip_prefix("http://127.0.0.1:").expect("loopback url");
+            let (_, tail) = rest.split_once('/').expect("path");
+            let (token, tail) = tail.split_once('/').expect("token prefix");
+            (token.to_string(), format!("/{tail}"))
+        };
+        let (token, tail) = path_of(&super::local_hls("https://example.com/master.m3u8", 720, 0, None));
+        assert_eq!(token.len(), 48);
+        assert!(tail.starts_with("/h/"), "hls route: {tail}");
+        let (token, tail) = path_of(&super::local_url("https://r1.googlevideo.com/videoplayback?x=1", None, "video/mp4"));
+        assert_eq!(token.len(), 48);
+        assert!(tail.starts_with("/s/"), "media route: {tail}");
     }
 }
 
