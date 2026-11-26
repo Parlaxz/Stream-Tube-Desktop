@@ -607,6 +607,21 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// Plain selectable text for titles and labels. Comments and descriptions get
+/// this through `rich_text`; plain `div().child(String)` is not selectable.
+pub fn selectable_text(id: impl Into<ElementId>, text: impl Into<SharedString>) -> AnyElement {
+    let raw = text.into();
+    let escaped = raw
+        .replace('\\', "\\\\")
+        .replace('*', "\\*")
+        .replace('_', "\\_")
+        .replace('`', "\\`")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('#', "\\#");
+    gpui_kit::base::TextView::markdown(id, escaped).selectable(true).into_any_element()
+}
+
 /// Selectable text (drag to select, Ctrl+C) with clickable links, timestamps,
 /// hashtags and handles. Right-click copies the whole text.
 pub fn rich_text(id: impl Into<ElementId>, text: String, cx: &App) -> AnyElement {

@@ -371,6 +371,31 @@ pub fn open_room(cx: &mut App) {
     });
 }
 
+/// Shows Settings in its own tab (reusing an open one), leaving the video tab
+/// alone instead of replacing it.
+pub fn open_settings(cx: &mut App) {
+    // keep watching in PiP while Settings opens in its own tab
+    let already = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()).map(|a| matches!(&a.read(cx).route, Route::Settings)).unwrap_or(false);
+    if !already && crate::player::controller::player(cx).read(cx).video.is_some() {
+        crate::ui::pip::open(cx);
+    }
+    let pip = crate::ui::pip::handle(cx);
+    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
+    let _ = win.update(cx, |_, window, cx| {
+        let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
+        app.update(cx, |a, cx| {
+            if matches!(&a.route, Route::Settings) {
+                return;
+            }
+            if let Some(i) = a.tabs.iter().position(|t| matches!(&t.route, Route::Settings)) {
+                a.switch_tab(i, window, cx);
+            } else {
+                a.new_tab(Route::Settings, None, None, true, window, cx);
+            }
+        });
+    });
+}
+
 /// Opens the Social page (friends, rooms, activity).
 pub fn open_social(cx: &mut App) {
     let pip = crate::ui::pip::handle(cx);
@@ -647,6 +672,18 @@ struct Tab {
     /// Each tab owns its player and mpv engine, so parked tabs keep their
     /// loaded video data (and exact position) in memory.
     player: Entity<Player>,
+    /// the tab group (folder) this tab belongs to
+    group: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TabGroup {
+    id: u64,
+    name: String,
+    icon: String,
+    color: u32,
+    #[serde(default)]
+    collapsed: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -720,12 +757,20 @@ struct SavedTab {
     channel: Option<String>,
     #[serde(default)]
     channel_info: Option<TabChannel>,
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    group: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SavedTabs {
     tabs: Vec<SavedTab>,
     active: usize,
+    #[serde(default)]
+    groups: Vec<TabGroup>,
+    #[serde(default)]
+    next_group_id: u64,
 }
 
 fn load_saved_tabs() -> Option<SavedTabs> {
@@ -800,6 +845,13 @@ pub struct AppView {
     /// use sqrt-based column count instead of the default 6
     tab_grid_dynamic: bool,
     closing_grid_tabs: Vec<u64>,
+    groups: Vec<TabGroup>,
+    next_group_id: u64,
+    editing_group: Option<u64>,
+    group_name: Entity<InputState>,
+    tab_grid_group: Option<u64>,
+    tab_grid_cols: u32,
+    tab_sort: String,
     _subs: Vec<Subscription>,
 }
 
@@ -815,6 +867,7 @@ impl AppView {
         cx.set_global(crate::ui::cards::Watched(store::progress_map()));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t("Search or paste a YouTube link")));
         let dialog_input = cx.new(|cx| InputState::new(window, cx));
+        let group_name = cx.new(|cx| InputState::new(window, cx));
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(&search, window, |this: &mut Self, state, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { .. } => {
@@ -863,10 +916,11 @@ impl AppView {
         let mut restored = None;
         if arg_route.is_none() {
             if let Some(saved) = load_saved_tabs() {
+                let SavedTabs { tabs: saved_tabs, active: saved_active, groups, next_group_id } = saved;
                 let mut tabs = Vec::new();
                 let mut active = usize::MAX;
                 let mut id = 1u64;
-                for (i, st) in saved.tabs.into_iter().enumerate() {
+                for (i, st) in saved_tabs.into_iter().enumerate() {
                     // Home is the pinned first tab, so a saved Home tab becomes it
                     if matches!(&st.route, Route::Home) {
                         continue;
@@ -875,11 +929,15 @@ impl AppView {
                         continue;
                     }
                     let player = crate::player::controller::create(cx);
-                    if i == saved.active {
+                    if i == saved_active {
                         active = tabs.len();
                     }
+                    let tab_id = if st.id != 0 { st.id } else { id };
+                    if tab_id >= id {
+                        id = tab_id + 1;
+                    }
                     tabs.push(Tab {
-                        id,
+                        id: tab_id,
                         route: st.route.clone(),
                         title: st.title,
                         channel: st.channel_info.or_else(|| {
@@ -893,17 +951,21 @@ impl AppView {
                         history: Vec::new(),
                         forward: Vec::new(),
                         player,
+                        group: st.group,
                     });
-                    id += 1;
+                    if st.id == 0 {
+                        id += 1;
+                    }
                 }
                 tabs.insert(0, Self::home_tab(player(cx)));
                 let active = if active == usize::MAX { 0 } else { active.min(tabs.len().saturating_sub(2)) + 1 };
                 let route = tabs[active].route.clone();
                 let p = tabs[active].player.clone();
-                restored = Some((tabs, active, id, route, p));
+                let next_group_id = next_group_id.max(groups.iter().map(|g| g.id + 1).max().unwrap_or(1));
+                restored = Some((tabs, active, id, route, p, groups, next_group_id));
             }
         }
-        let (tabs, active_tab, next_tab_id, start, p) = restored.unwrap_or_else(|| {
+        let (tabs, active_tab, next_tab_id, start, p, groups, next_group_id) = restored.unwrap_or_else(|| {
             let start = arg_route.unwrap_or_else(|| match store::settings_snapshot().start_page.as_str() {
                 "subscriptions" => Route::Subscriptions(None),
                 "history" => Route::History,
@@ -915,12 +977,12 @@ impl AppView {
                 0
             } else {
                 let p = crate::player::controller::create(cx);
-                tabs.push(Tab { id: 1, route: start.clone(), title: None, channel: None, page: None, history: Vec::new(), forward: Vec::new(), player: p });
+                tabs.push(Tab { id: 1, route: start.clone(), title: None, channel: None, page: None, history: Vec::new(), forward: Vec::new(), player: p, group: None });
                 next = 2;
                 1
             };
             let p = tabs[active].player.clone();
-            (tabs, active, next, start, p)
+            (tabs, active, next, start, p, Vec::new(), 1)
         });
         crate::player::controller::set_active(p.clone(), cx);
         // Only re-render the shell when the mini player appears/disappears; the
@@ -1050,6 +1112,13 @@ impl AppView {
             dialog: None,
             yt_playlists: None,
             dialog_input,
+            group_name,
+            groups,
+            next_group_id,
+            editing_group: None,
+            tab_grid_group: None,
+            tab_grid_cols: store::kv_get("tab_grid_cols").and_then(|s| s.parse().ok()).unwrap_or(6),
+            tab_sort: store::kv_get("tab_sort").unwrap_or_else(|| "manual".into()),
             focus,
             pending_watch_sync: None,
             login: LoginFlow::default(),
@@ -1452,7 +1521,7 @@ impl AppView {
                     MenuItem::new("history", t("History"), |window, cx| navigate(Route::History, window, cx)),
                     MenuItem::new("list-video", t("Playlists"), |window, cx| navigate(Route::Library, window, cx)),
                     MenuItem::new("download", t("Downloads"), |window, cx| navigate(Route::Downloads, window, cx)),
-                    MenuItem::new("settings", t("Settings"), |window, cx| navigate(Route::Settings, window, cx)),
+                    MenuItem::new("settings", t("Settings"), |_window, cx| open_settings(cx)),
                     MenuItem::new("refresh-cw", t("Sync subscriptions"), |_, cx| {
                         cx.spawn(async move |cx| {
                             let res = blocking(crate::api::auth::sync_subscriptions).await;
@@ -1561,6 +1630,7 @@ impl AppView {
             history: Vec::new(),
             forward: Vec::new(),
             player,
+            group: None,
         }
     }
 
@@ -1582,7 +1652,7 @@ impl AppView {
         let player = crate::player::controller::create(cx);
         // right after the current tab, like a browser
         let at = self.active_tab + 1;
-        self.tabs.insert(at, Tab { id, route, title, channel, page: None, history: Vec::new(), forward: Vec::new(), player });
+        self.tabs.insert(at, Tab { id, route, title, channel, page: None, history: Vec::new(), forward: Vec::new(), player, group: None });
         if switch {
             self.switch_tab(at, window, cx);
         } else {
@@ -1600,12 +1670,8 @@ impl AppView {
         crate::player::preview::stop(cx);
         crate::ui::image_cache::on_navigate(cx);
         self.drawer_open = false;
-        // pause the player of the tab we are leaving; its engine and cache stay alive.
-        // The room tab keeps playing while you browse, so the party does not stop.
-        if !matches!(&self.route, Route::Room) {
-            let old_player = self.tabs[self.active_tab].player.clone();
-            old_player.update(cx, |p, cx| p.park(cx));
-        }
+        // Tabs keep playing when you switch away. Only starting another video
+        // pauses the previous one (see controller::pause_others).
         // park the shown tab
         let cur = &mut self.tabs[self.active_tab];
         cur.route = self.route.clone();
@@ -1614,6 +1680,11 @@ impl AppView {
         cur.forward = std::mem::take(&mut self.forward);
         // and show the other one
         self.active_tab = index;
+        if let Some(gid) = self.tabs[index].group {
+            if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
+                g.collapsed = false;
+            }
+        }
         let next = self.tabs[index].clone();
         crate::player::controller::set_active(next.player.clone(), cx);
         self.route = next.route;
@@ -1766,7 +1837,45 @@ impl AppView {
             .flex_1()
             .min_w_0()
             .overflow_x_scroll();
+        // Group pills sit at the head of the tab rail; drop a tab on one to file it.
+        for g in self.groups.clone() {
+            let gid = g.id;
+            let icon_color: Hsla = rgb(g.color).into();
+            tabs = tabs.child(
+                div()
+                    .id(("rail-g", gid))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_2()
+                    .h(px(30.))
+                    .px_3()
+                    .rounded_lg()
+                    .bg(p.surface2)
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(p.hover))
+                    .child(icon(&g.icon).size_4().text_color(icon_color))
+                    .child(div().text_sm().text_color(p.text).child(g.name.clone()))
+                    .child(icon(if g.collapsed { "chevron-right" } else { "chevron-down" }).size_3().text_color(p.text2))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(g) = this.groups.iter_mut().find(|x| x.id == gid) {
+                            g.collapsed = !g.collapsed;
+                        }
+                        this.save_tabs(cx);
+                        cx.notify();
+                    }))
+                    .on_aux_click(cx.listener(move |this, _, window, cx| this.open_group_editor(gid, window, cx)))
+                    .on_drop::<TabDrag>(cx.listener(move |this, drag: &TabDrag, _, cx| this.assign_group(drag.id, Some(gid), cx))),
+            );
+        }
         for i in 0..self.tabs.len() {
+            if i != self.active_tab {
+                if let Some(gid) = self.tabs[i].group {
+                    if self.group(gid).is_some_and(|g| g.collapsed) {
+                        continue;
+                    }
+                }
+            }
             let active = i == self.active_tab;
             // the pinned Home tab is an icon only: no label, no close, no drag
             let pinned = i == 0;
@@ -1934,12 +2043,69 @@ impl AppView {
             let title = Some(Self::tab_label(&route, if active { None } else { tab.title.as_deref() }, &tab.player, cx));
             let channel_info = tab_channel(&route, tab.player.read(cx).video.as_ref(), tab.channel.as_ref());
             let channel = channel_info.as_ref().and_then(|c| c.avatar.clone());
-            tabs.push(SavedTab { route, title, channel, channel_info });
+            tabs.push(SavedTab { route, title, channel, channel_info, id: tab.id, group: tab.group });
         }
-        let state = SavedTabs { tabs, active: self.active_tab };
+        let state = SavedTabs { tabs, active: self.active_tab, groups: self.groups.clone(), next_group_id: self.next_group_id };
         if let Ok(s) = serde_json::to_string(&state) {
             store::kv_set("tabs_state", &s);
         }
+    }
+
+    // ───── tab groups ─────
+
+    fn group(&self, id: u64) -> Option<&TabGroup> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    fn assign_group(&mut self, tab_id: u64, group: Option<u64>, cx: &mut Context<Self>) {
+        if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            t.group = group;
+        }
+        self.save_tabs(cx);
+        cx.notify();
+    }
+
+    fn new_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.next_group_id;
+        self.next_group_id += 1;
+        let name = format!("Group {}", self.groups.len() + 1);
+        self.groups.push(TabGroup { id, name: name.clone(), icon: "folder".into(), color: 0xff0033, collapsed: false });
+        self.editing_group = Some(id);
+        self.tab_grid_open = true;
+        self.group_name.update(cx, |i, cx| i.set_value(name, window, cx));
+        let fh = self.group_name.read(cx).focus_handle(cx);
+        window.focus(&fh, cx);
+        self.save_tabs(cx);
+        cx.notify();
+    }
+
+    fn open_group_editor(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(g) = self.group(id) {
+            let name = g.name.clone();
+            self.group_name.update(cx, |i, cx| i.set_value(name, window, cx));
+            let fh = self.group_name.read(cx).focus_handle(cx);
+            window.focus(&fh, cx);
+            self.editing_group = Some(id);
+            self.tab_grid_open = true;
+            cx.notify();
+        }
+    }
+
+    fn delete_group(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.groups.retain(|g| g.id != id);
+        for t in &mut self.tabs {
+            if t.group == Some(id) {
+                t.group = None;
+            }
+        }
+        if self.tab_grid_group == Some(id) {
+            self.tab_grid_group = None;
+        }
+        if self.editing_group == Some(id) {
+            self.editing_group = None;
+        }
+        self.save_tabs(cx);
+        cx.notify();
     }
 
     /// Opens the tab grid on a left+right click chord.
@@ -1968,7 +2134,7 @@ impl AppView {
             let rows = ((n as f64).sqrt().floor() as usize).max(1);
             (n + rows - 1) / rows
         } else {
-            6
+            self.tab_grid_cols.max(1) as usize
         };
         let vp = cx.global::<UiState>().viewport;
         // the modal is 90% of the window in both directions
@@ -1978,8 +2144,26 @@ impl AppView {
         let item_w = ((modal_w - 32.0 - gap * cols.saturating_sub(1) as f32) / cols as f32).max(48.);
         let item_h = (item_w - 16.).max(32.) * 9.0 / 16.0;
 
+        // display order: optional group filter, then the chosen sort
+        let order = {
+            let mut order: Vec<usize> = (0..self.tabs.len()).collect();
+            if let Some(gid) = self.tab_grid_group {
+                order.retain(|&i| self.tabs[i].group == Some(gid));
+            }
+            let video_of = |i: usize| self.tabs[i].player.read(cx).video.clone();
+            match self.tab_sort.as_str() {
+                "length" => order.sort_by_key(|&i| std::cmp::Reverse(video_of(i).and_then(|v| v.duration_secs).unwrap_or(0))),
+                "recent" => order.sort_by_key(|&i| std::cmp::Reverse(video_of(i).and_then(|v| v.published_ts).unwrap_or(0))),
+                "views" => order.sort_by_key(|&i| {
+                    std::cmp::Reverse(video_of(i).and_then(|v| v.views_text.as_deref().and_then(crate::api::json::parse_count)).unwrap_or(0))
+                }),
+                _ => {}
+            }
+            order
+        };
+
         let mut grid = div().grid().grid_cols(cols.min(u16::MAX as usize) as u16).gap_3();
-        for i in 0..self.tabs.len() {
+        for &i in &order {
             let tab = &self.tabs[i];
             let active = i == self.active_tab;
             let route = if active { self.route.clone() } else { tab.route.clone() };
@@ -2140,6 +2324,291 @@ impl AppView {
             );
         }
 
+        // ── group rail, non-video pills and view controls ──
+        let groups = self.groups.clone();
+        let pill_base = |d: Stateful<Div>| {
+            d.flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .h(px(28.))
+                .rounded_full()
+                .text_sm()
+                .cursor_pointer()
+        };
+        let mut group_row = div().flex().items_center().gap_2().flex_wrap();
+        group_row = group_row.child(
+            pill_base(div().id("tg-g-all"))
+                .bg(if self.tab_grid_group.is_none() { p.accent } else { p.chip })
+                .text_color(if self.tab_grid_group.is_none() { white() } else { p.text })
+                .child(icon("layout-grid").size_4())
+                .child("All")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.tab_grid_group = None;
+                    cx.notify();
+                }))
+                .on_drop::<TabDrag>(cx.listener(|this, drag: &TabDrag, _, cx| this.assign_group(drag.id, None, cx))),
+        );
+        for g in &groups {
+            let gid = g.id;
+            let selected = self.tab_grid_group == Some(gid);
+            let icon_color: Hsla = rgb(g.color).into();
+            group_row = group_row.child(
+                pill_base(div().id(("tg-g", gid)))
+                    .bg(if selected { p.accent } else { p.chip })
+                    .text_color(if selected { white() } else { p.text })
+                    .child(icon(&g.icon).size_4().text_color(if selected { white() } else { icon_color }))
+                    .child(g.name.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.tab_grid_group = if selected { None } else { Some(gid) };
+                        cx.notify();
+                    }))
+                    .on_aux_click(cx.listener(move |this, _, window, cx| this.open_group_editor(gid, window, cx)))
+                    .on_drop::<TabDrag>(cx.listener(move |this, drag: &TabDrag, _, cx| this.assign_group(drag.id, Some(gid), cx))),
+            );
+        }
+        group_row = group_row.child(
+            pill_base(div().id("tg-g-new"))
+                .bg(p.chip)
+                .text_color(p.text)
+                .child(icon("plus").size_4())
+                .child("New group")
+                .on_click(cx.listener(|this, _, window, cx| this.new_group(window, cx))),
+        );
+
+        let mut nv_row = div().flex().items_center().gap_2().flex_wrap();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let active = i == self.active_tab;
+            let route = if active { self.route.clone() } else { tab.route.clone() };
+            if matches!(route, Route::Watch { .. } | Route::Shorts(Some(_))) {
+                continue;
+            }
+            let label = Self::tab_label(&route, if active { None } else { tab.title.as_deref() }, &tab.player, cx);
+            let id = tab.id;
+            nv_row = nv_row.child(
+                div()
+                    .id(("tg-nv", id))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(30.))
+                    .rounded_full()
+                    .bg(p.chip)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(p.hover))
+                    .child(icon(Self::tab_icon(&route)).size_4().text_color(p.text2))
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
+                            this.switch_tab(i, window, cx);
+                        }
+                        this.tab_grid_open = false;
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let cols_label = if self.tab_grid_dynamic { "Dynamic".to_string() } else { format!("{} columns", self.tab_grid_cols) };
+        let columns_pill = div()
+            .id("tg-cols")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .h(px(28.))
+            .rounded_full()
+            .bg(p.chip)
+            .text_sm()
+            .text_color(p.text)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.tab_grid_dynamic {
+                    this.tab_grid_dynamic = false;
+                    this.tab_grid_cols = 4;
+                } else if this.tab_grid_cols <= 4 {
+                    this.tab_grid_cols = 6;
+                } else if this.tab_grid_cols <= 6 {
+                    this.tab_grid_cols = 8;
+                } else {
+                    this.tab_grid_dynamic = true;
+                    this.tab_grid_cols = 6;
+                }
+                store::kv_set("tab_grid_dynamic", if this.tab_grid_dynamic { "1" } else { "0" });
+                store::kv_set("tab_grid_cols", &this.tab_grid_cols.to_string());
+                cx.notify();
+            }))
+            .child(icon("layout-grid").size_4())
+            .child(cols_label);
+
+        let sort_label = match self.tab_sort.as_str() {
+            "length" => "Length",
+            "recent" => "Recent",
+            "views" => "Views",
+            _ => "Manual",
+        };
+        let sort_pill = div()
+            .id("tg-sort")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .h(px(28.))
+            .rounded_full()
+            .bg(p.chip)
+            .text_sm()
+            .text_color(p.text)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.tab_sort = match this.tab_sort.as_str() {
+                    "manual" => "length",
+                    "length" => "recent",
+                    "recent" => "views",
+                    _ => "manual",
+                }
+                .to_string();
+                store::kv_set("tab_sort", &this.tab_sort);
+                cx.notify();
+            }))
+            .child(icon("arrow-down-up").size_4())
+            .child(sort_label);
+
+        // group editor replaces the grid while open
+        let content = if let Some(g) = self.editing_group.and_then(|id| self.group(id)).cloned() {
+            let gid = g.id;
+            let mut ed = div().flex().flex_col().gap_3().p_3().rounded_xl().bg(p.surface2);
+            ed = ed.child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(format!("Edit {}", g.name)));
+            ed = ed.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_3()
+                            .py_1()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(p.border)
+                            .bg(p.bg)
+                            .child(Input::new(&self.group_name).appearance(false)),
+                    )
+                    .child(
+                        div()
+                            .id("tg-g-rename")
+                            .flex()
+                            .items_center()
+                            .px_3()
+                            .h_8()
+                            .rounded_lg()
+                            .bg(p.chip)
+                            .text_sm()
+                            .text_color(p.text)
+                            .cursor_pointer()
+                            .child("Save name")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let name = this.group_name.read(cx).value().trim().to_string();
+                                if !name.is_empty() {
+                                    if let Some(g) = this.groups.iter_mut().find(|x| x.id == gid) {
+                                        g.name = name;
+                                    }
+                                    this.save_tabs(cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+            let mut icons = div().flex().items_center().gap_2().flex_wrap();
+            for ic in ["folder", "users", "star", "heart", "flame", "music", "film", "bookmark", "gamepad-2", "tv"] {
+                let current = g.icon == ic;
+                icons = icons.child(
+                    div()
+                        .id(SharedString::from(format!("gicon-{gid}-{ic}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(30.))
+                        .rounded_lg()
+                        .bg(if current { p.accent } else { p.chip })
+                        .cursor_pointer()
+                        .child(icon(ic).size_4().text_color(if current { white() } else { p.text }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(g) = this.groups.iter_mut().find(|x| x.id == gid) {
+                                g.icon = ic.to_string();
+                            }
+                            this.save_tabs(cx);
+                            cx.notify();
+                        })),
+                );
+            }
+            ed = ed.child(div().text_xs().text_color(p.text2).child("Icon")).child(icons);
+            let mut colors = div().flex().items_center().gap_2().flex_wrap();
+            for c in [0xffffffu32, 0xff0033, 0x3ea6ff, 0x2ba640, 0xffb400, 0xf0307e, 0x7a3cf5, 0x888888] {
+                let fill: Hsla = rgb(c).into();
+                colors = colors.child(
+                    div()
+                        .id(SharedString::from(format!("gcol-{gid}-{c:x}")))
+                        .size(px(24.))
+                        .rounded_full()
+                        .bg(fill)
+                        .cursor_pointer()
+                        .when(g.color == c, |d| d.border_2().border_color(white()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(g) = this.groups.iter_mut().find(|x| x.id == gid) {
+                                g.color = c;
+                            }
+                            this.save_tabs(cx);
+                            cx.notify();
+                        })),
+                );
+            }
+            ed = ed.child(div().text_xs().text_color(p.text2).child("Color")).child(colors);
+            ed = ed
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pt_1()
+                        .child(
+                            div()
+                                .id("tg-g-del")
+                                .flex()
+                                .items_center()
+                                .px_3()
+                                .h_8()
+                                .rounded_lg()
+                                .bg(Hsla::from(rgb(0xcc0000)))
+                                .text_sm()
+                                .text_color(white())
+                                .cursor_pointer()
+                                .child("Delete group")
+                                .on_click(cx.listener(move |this, _, _, cx| this.delete_group(gid, cx))),
+                        )
+                        .child(
+                            div()
+                                .id("tg-g-done")
+                                .flex()
+                                .items_center()
+                                .px_3()
+                                .h_8()
+                                .rounded_lg()
+                                .bg(p.chip)
+                                .text_sm()
+                                .text_color(p.text)
+                                .cursor_pointer()
+                                .child("Done")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.editing_group = None;
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            ed.into_any_element()
+        } else {
+            div().id("tg-grid-wrap").flex_1().min_h_0().overflow_y_scroll().child(grid).into_any_element()
+        };
+
         Some(
             deferred(
                 div()
@@ -2150,6 +2619,7 @@ impl AppView {
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
                                 this.tab_grid_open = false;
+                                this.editing_group = None;
                                 cx.notify();
                             }),
                         ),
@@ -2187,34 +2657,18 @@ impl AppView {
                                                     .flex()
                                                     .items_center()
                                                     .gap_2()
-                                                    .child(
-                                                        div()
-                                                            .id("tg-dynamic")
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap_2()
-                                                            .px_3()
-                                                            .h(px(28.))
-                                                            .rounded_full()
-                                                            .bg(if self.tab_grid_dynamic { p.accent } else { p.chip })
-                                                            .text_sm()
-                                                            .text_color(if self.tab_grid_dynamic { white() } else { p.text })
-                                                            .cursor_pointer()
-                                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                                this.tab_grid_dynamic = !this.tab_grid_dynamic;
-                                                                store::kv_set("tab_grid_dynamic", if this.tab_grid_dynamic { "1" } else { "0" });
-                                                                cx.notify();
-                                                            }))
-                                                            .child(icon("layout-grid").size_4())
-                                                            .child(if self.tab_grid_dynamic { "Dynamic" } else { "6 columns" }),
-                                                    )
+                                                    .child(columns_pill)
+                                                    .child(sort_pill)
                                                     .child(icon_button("tg-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
                                                         this.tab_grid_open = false;
+                                                        this.editing_group = None;
                                                         cx.notify();
                                                     }))),
                                             ),
                                     )
-                                    .child(div().id("tg-grid-wrap").flex_1().min_h_0().overflow_y_scroll().child(grid)),
+                                    .child(group_row)
+                                    .child(nv_row)
+                                    .child(content),
                             ),
                     ),
             )
@@ -2709,6 +3163,7 @@ impl AppView {
         }
         if k == "escape" && self.tab_grid_open {
             self.tab_grid_open = false;
+            self.editing_group = None;
             cx.notify();
             return;
         }
@@ -3144,7 +3599,7 @@ impl AppView {
                     .children(preserve_btn)
                     .child(self.render_notifications(cx))
                     .child(self.render_dl_button(cx))
-                    .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
+                    .child(icon_button("settings", "settings", cx).on_click(cx.listener(|_, _, _window, cx| open_settings(cx))))
                     .child(self.account_button(cx))
                     .child(drag_gap("drag-c").w_3())
                     .child(window_controls(maximized, cx)),

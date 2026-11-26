@@ -90,6 +90,8 @@ pub struct PlayerView {
     menu_closed_at: std::time::Instant,
     seek_bounds: Rc<Cell<Bounds<Pixels>>>,
     vol_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// the read-ahead / back-cache slider in the cog menu
+    cache_bounds: Rc<Cell<Bounds<Pixels>>>,
     hover_frac: Option<f32>,
     drag_seek: Option<f32>,
     /// A press near the seek bar started a seek; the click layer ignores it.
@@ -130,6 +132,7 @@ impl PlayerView {
             menu_closed_at: Instant::now() - std::time::Duration::from_secs(5),
             seek_bounds: Rc::new(Cell::new(Bounds::default())),
             vol_bounds: Rc::new(Cell::new(Bounds::default())),
+            cache_bounds: Rc::new(Cell::new(Bounds::default())),
             hover_frac: None,
             drag_seek: None,
             zone_seek: None,
@@ -438,7 +441,10 @@ impl Render for PlayerView {
                     this.hover_frac = Some(f);
                 } else if this.drag_vol {
                     let f = Self::frac_in(this.vol_bounds.get(), ev.position.x);
-                    this.player.update(cx, |p, _| p.set_volume(f as f64 * 100.0));
+                    this.player.update(cx, |p, _| {
+                        let max = p.max_volume();
+                        p.set_volume(f as f64 * max);
+                    });
                 } else {
                     let sb = this.seek_bounds.get();
                     let near = ev.position.y >= sb.origin.y - px(12.) && ev.position.y <= sb.origin.y + sb.size.height + px(8.);
@@ -1344,7 +1350,7 @@ impl PlayerView {
             )
             .child(speed_btn("c-spd-up", "plus", st.speed_up_step.max(0.01)));
         let vol_icon = if muted || volume <= 0.0 { "volume-x" } else if volume < 50.0 { "volume-1" } else { "volume-2" };
-        let vol_frac = if muted { 0.0 } else { (volume / 100.0).min(1.0) as f32 };
+        let vol_frac = if muted { 0.0 } else { (volume / pl.max_volume()).min(1.0) as f32 };
         let vol_level = if muted { 0 } else { volume.round() as i64 };
         let show_vol_level = !narrow && !st.hide_volume_level;
         let time_text = if is_live {
@@ -1408,7 +1414,10 @@ impl PlayerView {
                                     cx.stop_propagation();
                                     this.drag_vol = true;
                                     let f = Self::frac_in(this.vol_bounds.get(), ev.position.x);
-                                    this.player.update(cx, |p, _| p.set_volume(f as f64 * 100.0));
+                                    this.player.update(cx, |p, _| {
+                                        let max = p.max_volume();
+                                        p.set_volume(f as f64 * max);
+                                    });
                                     cx.notify();
                                 }),
                             ),
@@ -1759,7 +1768,7 @@ impl PlayerView {
                     })
                     .child({
                         let boost = pl.volume_boost;
-                        let label = if boost <= 0.0 { "Off".to_string() } else { format!("+{}%", (boost * 100.0).round() as i32) };
+                        let label = if boost <= 0.0 { "Off".to_string() } else { "On".to_string() };
                         row("m-vb".into(), Some("gauge"), "Volume boost".into(), Some(label), false)
                             .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::VolumeBoost); cx.notify() }))
                     })
@@ -1946,7 +1955,8 @@ impl PlayerView {
             Menu::VolumeBoost => {
                 let cur = pl.volume_boost;
                 panel = panel.child(header("Volume boost", cx));
-                for (boost, label) in [(0.0, "Off"), (0.5, "+50%"), (1.0, "+100%")] {
+                panel = panel.child(div().px_3().pb_1().text_xs().text_color(hsla(0., 0., 1., 0.6)).child("Raises the volume slider to 500%. No extra gain."));
+                for (boost, label) in [(0.0, "Off"), (1.0, "On (up to 500%)")] {
                     panel = panel.child(row(SharedString::from(format!("vb-{}", (boost * 100.0) as i32)), None, label.into(), None, (cur - boost).abs() < 0.001).on_click(cx.listener(move |t, _, _, cx| {
                         t.menu = None;
                         t.player.update(cx, |p, cx| p.set_volume_boost(boost, cx));
@@ -1955,7 +1965,52 @@ impl PlayerView {
             }
             Menu::ReadAhead => {
                 let cur = store::settings_snapshot().read_ahead_mb;
+                let b = self.cache_bounds.clone();
+                let f = ((cur.clamp(16, 768) - 16) as f32) / (768.0 - 16.0);
                 panel = panel.child(header("Read ahead", cx));
+                panel = panel.child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_xs().text_color(hsla(0., 0., 1., 0.7)).child("MB kept past the playhead"))
+                                .child(div().text_sm().text_color(white()).child(format!("{cur} MB"))),
+                        )
+                        .child(
+                            div()
+                                .id("ra-slider")
+                                .relative()
+                                .h(px(18.))
+                                .cursor_pointer()
+                                .child(canvas(move |bnd, _, _| b.set(bnd), |_, _, _, _| {}).absolute().size_full())
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top(px(7.))
+                                        .left_0()
+                                        .right_0()
+                                        .h(px(4.))
+                                        .rounded_full()
+                                        .bg(hsla(0., 0., 1., 0.3))
+                                        .child(div().h_full().rounded_full().w(relative(f)).bg(white())),
+                                )
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    let f = Self::frac_in(this.cache_bounds.get(), ev.position.x);
+                                    let mb = (16.0 + f as f64 * (768.0 - 16.0)).round() as u32;
+                                    store::update_settings(|s| s.read_ahead_mb = mb.clamp(16, 4096));
+                                    crate::player::controller::apply_read_ahead(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                );
                 for mb in [48u32, 96, 192, 384, 768] {
                     panel = panel.child(row(SharedString::from(format!("ra-{mb}")), None, format!("{mb} MB"), None, cur == mb).on_click(cx.listener(move |t, _, _, cx| {
                         t.menu = None;
@@ -1966,7 +2021,52 @@ impl PlayerView {
             }
             Menu::ReadBack => {
                 let cur = store::settings_snapshot().read_ahead_back_mb;
+                let b = self.cache_bounds.clone();
+                let f = (cur.clamp(0, 512) as f32) / 512.0;
                 panel = panel.child(header("Back cache", cx));
+                panel = panel.child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_xs().text_color(hsla(0., 0., 1., 0.7)).child("Already-played video kept in memory"))
+                                .child(div().text_sm().text_color(white()).child(format!("{cur} MB"))),
+                        )
+                        .child(
+                            div()
+                                .id("rb-slider")
+                                .relative()
+                                .h(px(18.))
+                                .cursor_pointer()
+                                .child(canvas(move |bnd, _, _| b.set(bnd), |_, _, _, _| {}).absolute().size_full())
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top(px(7.))
+                                        .left_0()
+                                        .right_0()
+                                        .h(px(4.))
+                                        .rounded_full()
+                                        .bg(hsla(0., 0., 1., 0.3))
+                                        .child(div().h_full().rounded_full().w(relative(f)).bg(white())),
+                                )
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    let f = Self::frac_in(this.cache_bounds.get(), ev.position.x);
+                                    let mb = (f as f64 * 512.0).round() as u32;
+                                    store::update_settings(|s| s.read_ahead_back_mb = mb.clamp(0, 512));
+                                    crate::player::controller::apply_read_ahead(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                );
                 for mb in [8u32, 24, 64, 128, 256] {
                     panel = panel.child(row(SharedString::from(format!("rb-{mb}")), None, format!("{mb} MB"), None, cur == mb).on_click(cx.listener(move |t, _, _, cx| {
                         t.menu = None;

@@ -682,7 +682,13 @@ impl WatchPage {
             .flex_col()
             .gap_3()
             .pt_3()
-            .child(div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child(title))
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(p.text)
+                    .child(crate::ui::widgets::selectable_text(format!("wt-{}", w.id), title)),
+            )
             .child(
                 div()
                     .flex()

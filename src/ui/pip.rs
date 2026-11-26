@@ -17,7 +17,11 @@ pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
 }
 
 /// Keeps picture-in-picture on the tab that is active after a tab switch.
+/// A tab with no video (Settings, Home, ...) leaves PiP on the video it shows.
 pub fn follow(player: Entity<Player>, cx: &mut App) {
+    if player.read(cx).video.is_none() {
+        return;
+    }
     let Some(h) = handle(cx) else { return };
     let _ = h.update(cx, |root: gpui_kit::AnyView, _, cx| {
         let Ok(pip) = root.downcast::<PipView>() else { return };

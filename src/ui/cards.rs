@@ -69,6 +69,25 @@ pub fn branded(v: &VideoItem, cx: &mut App) -> (String, String) {
 
 // ───────────────────────── shared pieces ─────────────────────────
 
+/// "3 hours ago" style, and a plain date once the video is more than a year old.
+pub fn published_age(ts: i64) -> String {
+    let now = chrono::Utc::now().timestamp();
+    if now.saturating_sub(ts) > 365 * 86400 {
+        return chrono::DateTime::from_timestamp(ts, 0)
+            .map(|d| d.format("%b %d, %Y").to_string())
+            .unwrap_or_else(|| crate::api::json::relative_from_ts(ts));
+    }
+    crate::api::json::relative_from_ts(ts)
+}
+
+/// Uploaded within the last week (for the "New" badge).
+pub fn is_new(v: &VideoItem) -> bool {
+    v.published_ts.is_some_and(|ts| {
+        let now = chrono::Utc::now().timestamp();
+        ts <= now && now - ts < 7 * 86400
+    })
+}
+
 pub fn meta_line(v: &VideoItem) -> String {
     let s = store::settings_snapshot();
     let mut parts = Vec::new();
@@ -81,10 +100,16 @@ pub fn meta_line(v: &VideoItem) -> String {
         if parts.is_empty() {
             parts.push(t("LIVE").into());
         }
-    } else if let Some(p) = &v.published_text {
-        parts.push(p.clone());
-    } else if let Some(ts) = v.published_ts {
-        parts.push(crate::api::json::relative_from_ts(ts));
+    } else {
+        // Shorts get a date from YouTube; always show their age instead.
+        let published = if v.is_short {
+            v.published_ts.map(published_age).or_else(|| v.published_text.clone())
+        } else {
+            v.published_text.clone().or_else(|| v.published_ts.map(published_age))
+        };
+        if let Some(p) = published {
+            parts.push(p);
+        }
     }
     parts.join(", ")
 }
@@ -405,13 +430,15 @@ fn watch_route(v: &VideoItem) -> Route {
 }
 
 fn video_title(title: String) -> Stateful<Div> {
-    let title = SharedString::from(title);
-    let full_title = title.clone();
+    let full_title = SharedString::from(title.clone());
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&title, &mut h);
+    let id = format!("video-title-{:x}", std::hash::Hasher::finish(&h));
     div()
         .id("video-title")
         .line_clamp(2)
         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full_title.clone()).max_w(px(420.)).build(window, cx))
-        .child(title)
+        .child(crate::ui::widgets::selectable_text(id, title))
 }
 
 fn middle_click_tab(route: Route) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
@@ -556,6 +583,7 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
     let channel = Some(crate::ui::app::TabChannel::from(v));
     let channel_aux = channel.clone();
     let meta = meta_line(v);
+    let new = is_new(v);
     let h = width * (16. / 9.);
     div()
         .id(SharedString::from(format!("sc-{}", v.id)))
@@ -568,6 +596,22 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
         .on_click(move |ev, window, cx| activate(route.clone(), Some(tab_title.clone()), channel.clone(), ev, window, cx))
         .on_aux_click(move |ev, window, cx| activate(route_aux.clone(), Some(title_aux.clone()), channel_aux.clone(), ev, window, cx))
         .child(thumbnail(v, thumb, width, h, px(12.), cx))
+        .when(new, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top_2()
+                    .left_2()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(white())
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(Hsla::from(rgb(0x0f0f0f)))
+                    .child("New"),
+            )
+        })
         .child(
             div()
                 .flex()
@@ -578,7 +622,14 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
                         .flex_col()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(title))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.text)
+                                .line_clamp(2)
+                                .child(crate::ui::widgets::selectable_text(format!("sct-{}", v.id), title)),
+                        )
                         .when(!meta.is_empty(), |d| d.child(div().text_xs().text_color(p.text2).child(meta))),
                 )
                 .child(more_button(SharedString::from(format!("sm-{}", v.id)), v, cx)),
@@ -727,7 +778,14 @@ pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn
                 .flex_1()
                 .min_w_0()
                 .gap_1()
-                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).line_clamp(2).child(title))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.text)
+                        .line_clamp(2)
+                        .child(crate::ui::widgets::selectable_text(format!("crt-{}", v.id), title)),
+                )
                 .child(cname_el.child(v.channel_name.clone()))
                 .child(div().text_xs().text_color(p.text2).truncate().child(meta_line(v))),
         )

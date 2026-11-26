@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.11.1
+
+### Tabs
+
+- **Tab groups**: group pills sit at the top of the tab overview and in the tab rail. Drag a tab onto a pill to file it, drag onto **All** to unfile it. Click a rail pill to collapse or expand its tabs; right-click one to rename it, change its icon or color, or delete it. Groups and membership survive a restart.
+- **Non-video tabs** (Home, Settings, Downloads, Social, channels, playlists…) appear as icon pills under the group row, with the name on hover.
+- Tab overview layouts now cycle **Dynamic → 4 → 6 → 8** columns, and tabs can be sorted by **Length**, **Recency** or **Views**.
+
+### Player
+
+- A video keeps playing when you switch to another tab or Home. Starting another video pauses the previous one.
+- **Volume boost** is a toggle now: it raises the volume slider's cap to **500%** and adds no audio gain.
+- **Read ahead** and **Back cache** have sliders in the player's cog menu, with the presets still there.
+- The top-bar **Settings** button opens Settings in its own tab (or the existing Settings tab) and keeps the video in picture-in-picture.
+
+### Reading
+
+- Video titles on cards and under the player are selectable: drag over the text, then copy it.
+
+### Shorts
+
+- Shorts show relative upload times (minutes, hours, days, weeks, months) and a plain date after a year, plus a **New** badge for anything uploaded in the last week.
+
 ## 0.11.0
 
 ### Watch party

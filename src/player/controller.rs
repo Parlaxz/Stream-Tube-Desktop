@@ -150,6 +150,21 @@ pub fn set_active(p: Entity<Player>, cx: &mut App) {
     cx.set_global(PlayerHandle(p));
 }
 
+/// Pauses every other tab's player, so starting a video stops the previous one
+/// while merely switching tabs lets it keep playing.
+pub fn pause_others(active: Entity<Player>, cx: &mut App) {
+    for p in all_players() {
+        if p.entity_id() == active.entity_id() {
+            continue;
+        }
+        p.update(cx, |p, cx| {
+            if !p.paused && p.video.is_some() {
+                p.set_paused(true, cx);
+            }
+        });
+    }
+}
+
 pub fn enqueue(v: VideoItem, cx: &mut App) {
     player(cx).update(cx, |p, cx| {
         if p.video.is_none() {
@@ -742,6 +757,8 @@ impl Player {
     }
 
     pub fn play(&mut self, video: VideoItem, start: Option<f64>, cx: &mut Context<Self>) {
+        let me = cx.entity();
+        pause_others(me, cx);
         self.playback_timing = std::env::var_os("STREAMTUBE_PLAYBACK_TIMING").map(|_| ("open", Instant::now()));
         self.keyboard_feedback = None;
         self.preloaded_until = 0.0;
@@ -1394,8 +1411,13 @@ impl Player {
         self.keyboard_feedback = Some((feedback, hide));
     }
 
+    /// Volume boost only widens the slider's range; it does not add gain.
+    pub fn max_volume(&self) -> f64 {
+        if self.volume_boost > 0.0 { 500.0 } else { 150.0 }
+    }
+
     pub fn set_volume(&mut self, v: f64) {
-        let v = v.clamp(0.0, 150.0);
+        let v = v.clamp(0.0, self.max_volume());
         eprintln!("[VOL] set_volume raw={v} old={}", self.volume);
         self.volume = v;
         if let Some(m) = &self.mpv {
@@ -1408,7 +1430,7 @@ impl Player {
     }
 
     pub fn set_eq_preset(&mut self, preset: &str) {
-        let filter = audio_filters(eq_filter(preset), self.volume_boost);
+        let filter = audio_filters(eq_filter(preset), 0.0);
         if let Some(m) = &self.mpv {
             m.set("af", &filter);
         }
@@ -1416,15 +1438,12 @@ impl Player {
         store::update_settings(|s| s.eq_preset = p.to_string());
     }
 
-    /// Extra gain for the current video only; the next video starts without it.
+    /// Toggle for the current video only: widens the volume slider to 500%.
     pub fn set_volume_boost(&mut self, boost: f64, cx: &mut Context<Self>) {
-        self.volume_boost = boost.max(0.0);
-        let eq = eq_filter(&store::settings_snapshot().eq_preset);
-        if let Some(m) = &self.mpv {
-            m.set("af", &audio_filters(eq, self.volume_boost));
-        }
-        let label = if self.volume_boost <= 0.0 { "off".to_string() } else { format!("+{}%", (self.volume_boost * 100.0).round() as i32) };
+        self.volume_boost = if boost > 0.0 { 1.0 } else { 0.0 };
+        let label = if self.volume_boost > 0.0 { "on (up to 500%)" } else { "off" };
         toast(cx, format!("Volume boost: {label}"));
+        self.set_volume(self.volume);
         cx.notify();
     }
 
