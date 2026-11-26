@@ -371,6 +371,38 @@ pub fn open_room(cx: &mut App) {
     });
 }
 
+/// Closes the room tab, which leaves the room. Used by every "Leave room"
+/// button so the tab and the room state never drift apart.
+pub fn close_room(cx: &mut App) {
+    let pip = crate::ui::pip::handle(cx);
+    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else {
+        crate::room::leave_room(cx);
+        return;
+    };
+    let _ = win.update(cx, |_, window, cx| {
+        let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
+        app.update(cx, |a, cx| {
+            let found = (0..a.tabs.len()).find(|&i| {
+                let route = if i == a.active_tab { &a.route } else { &a.tabs[i].route };
+                matches!(route, Route::Room)
+            });
+            if let Some(i) = found {
+                a.close_tab(i, window, cx);
+            } else {
+                crate::room::leave_room(cx);
+            }
+        });
+    });
+}
+
+/// The last video loaded in any open tab. The Social page is usually the
+/// active tab, so its own player is empty even while a video tab is open.
+pub fn recent_video(cx: &App) -> Option<VideoItem> {
+    let app = cx.try_global::<AppHandle>()?.0.upgrade()?;
+    let a = app.read(cx);
+    a.tabs.iter().find_map(|tab| tab.player.read(cx).video.clone())
+}
+
 /// Shows Settings in its own tab (reusing an open one), leaving the video tab
 /// alone instead of replacing it.
 pub fn open_settings(cx: &mut App) {
@@ -932,6 +964,11 @@ impl AppView {
                 for (i, st) in saved_tabs.into_iter().enumerate() {
                     // Home is the pinned first tab, so a saved Home tab becomes it
                     if matches!(&st.route, Route::Home) {
+                        continue;
+                    }
+                    // A room is a live session, not a page to restore: the room
+                    // state is gone after a restart, so its tab would be empty.
+                    if matches!(&st.route, Route::Room) {
                         continue;
                     }
                     if matches!(&st.route, Route::Channel(x) | Route::Playlist(x) | Route::Watch { id: x, .. } if x.is_empty()) {
@@ -1685,6 +1722,10 @@ impl AppView {
         // a room tab always sits right after the pinned Home tab
         let at = if matches!(&route, Route::Room) { 1.min(self.tabs.len()) } else { self.active_tab + 1 };
         self.tabs.insert(at, Tab { id, route, title, channel, page: None, history: Vec::new(), forward: Vec::new(), player, group: None });
+        // inserting before the active tab shifts its slot; keep pointing at it
+        if at <= self.active_tab {
+            self.active_tab += 1;
+        }
         if switch {
             self.switch_tab(at, window, cx);
         } else {
@@ -2071,6 +2112,10 @@ impl AppView {
         tabs = rail;
         let plus = div()
             .id("tab-new")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.tab_grid_open = true;
+                cx.notify();
+            }))
             .flex()
             .flex_none()
             .items_center()
@@ -4052,7 +4097,7 @@ impl AppView {
         let p = pal(cx);
         let pl = player(cx);
         let video = pl.read(cx).video.clone()?;
-        if matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
+        if matches!(self.route, Route::Watch { .. } | Route::Shorts(_) | Route::Room) {
             return None;
         }
         let id = video.id.clone();
@@ -4869,7 +4914,7 @@ impl Render for AppView {
         if !is_shorts {
             crate::player::shorts_preload::clear();
         }
-        let has_slot = matches!(self.route, Route::Watch { .. } | Route::Shorts(_));
+        let has_slot = matches!(self.route, Route::Watch { .. } | Route::Shorts(_) | Route::Room);
         let page_id = self.page.entity_id();
         let page_area = div()
             .relative()

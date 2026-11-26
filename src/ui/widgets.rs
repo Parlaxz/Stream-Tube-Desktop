@@ -629,6 +629,20 @@ pub fn selectable_text(id: impl Into<ElementId>, text: impl Into<SharedString>) 
         .into_any_element()
 }
 
+/// Trusted Markdown (no escaping): headings, lists and code blocks render as
+/// Markdown. Use this for embedded docs such as the changelog, not for user
+/// text, which must go through [`selectable_text`] / [`rich_text`].
+pub fn markdown_text(id: impl Into<ElementId>, text: impl Into<SharedString>) -> AnyElement {
+    let full = text.into().to_string();
+    div()
+        .w_full()
+        .child(gpui_kit::base::TextView::markdown(id, full.clone()).selectable(true))
+        .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
+            text_menu(full.clone(), Vec::new(), ev, window, cx)
+        })
+        .into_any_element()
+}
+
 /// Right-click menu for selectable text: copy the selection, or all of it.
 fn text_menu(full: String, urls: Vec<String>, ev: &MouseDownEvent, window: &mut Window, cx: &mut App) {
     cx.stop_propagation();

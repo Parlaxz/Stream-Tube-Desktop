@@ -1476,7 +1476,7 @@ impl SettingsPage {
             .child(
                 card(cx)
                     .child(div().pt_2().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Changelog"))
-                    .child(rich_text("about-changelog", CHANGELOG.to_string(), cx)),
+                    .child(markdown_text("about-changelog", CHANGELOG)),
             )
     }
 }

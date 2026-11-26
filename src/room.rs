@@ -5,7 +5,6 @@
 //! (tools/relay) only routes these tiny control lines; video never passes
 //! through it. Sync drives the embedded player directly, so no mpv IPC is used.
 use crate::api::types::VideoItem;
-use crate::player::controller;
 use crate::store;
 use crate::ui::{toast, toast_with_actions};
 use gpui_kit::*;
@@ -79,6 +78,10 @@ pub struct Sync {
     pub queue: Vec<VideoItem>,
     #[serde(default)]
     pub qpos: Option<usize>,
+    /// A state message carries the whole queue (even an empty one). Heartbeats
+    /// leave it false and omit the queue to stay small.
+    #[serde(default)]
+    pub full: bool,
     /// For "activity": "like", "dislike" or "share".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub action: String,
@@ -124,6 +127,9 @@ struct Inner {
     invite: Option<Invite>,
     out: Option<Sender<String>>,
     ctl: Option<TcpStream>,
+    /// Bumped on every connect/disconnect so events from an old socket are
+    /// ignored and cannot overwrite a newer connection's status.
+    conn: u64,
     last_sent: Option<Sync>,
     /// last (time, at, speed, paused) seen from the player, to tell a seek from
     /// normal playback
@@ -158,6 +164,7 @@ impl Inner {
             invite: None,
             out: None,
             ctl: None,
+            conn: 0,
             last_sent: None,
             obs: None,
             beat: Instant::now(),
@@ -228,9 +235,9 @@ pub fn snapshot(cx: &mut App) -> Snapshot {
 }
 
 enum Event {
-    Connected(Sender<String>, TcpStream),
-    Line(String),
-    Down(String),
+    Connected(u64, Sender<String>, TcpStream),
+    Line(u64, String),
+    Down(u64, String),
 }
 
 static EVENTS: OnceLock<futures::channel::mpsc::UnboundedSender<Event>> = OnceLock::new();
@@ -286,22 +293,33 @@ pub fn connect(cx: &mut App) {
     }
     // host:port, tolerating a missing port
     let relay = if relay.contains(':') { relay } else { format!("{relay}:8930") };
-    {
+    let (conn_gen, old_ctl) = {
         let r = cx.default_global::<Room>();
         let mut g = r.inner.lock().unwrap();
+        // Drop any previous socket before opening a new one.
+        g.out = None;
+        g.conn = g.conn.wrapping_add(1);
         g.status = Status::Connecting;
         g.error = None;
+        (g.conn, g.ctl.take())
+    };
+    if let Some(s) = old_ctl {
+        let _ = s.shutdown(Shutdown::Both);
     }
     cx.refresh_windows();
     let Some(tx) = events() else { return };
-    std::thread::spawn(move || net_loop(relay, token, me, name, tx));
+    std::thread::spawn(move || net_loop(relay, token, me, name, conn_gen, tx));
 }
 
 pub fn disconnect(cx: &mut App) {
+    // Closing the relay also ends the party: close the room tab (which leaves
+    // the room) so no empty room tab is left behind.
+    crate::ui::app::close_room(cx);
     let ctl = {
         let r = cx.default_global::<Room>();
         let mut g = r.inner.lock().unwrap();
         g.out = None;
+        g.conn = g.conn.wrapping_add(1);
         g.status = Status::Offline;
         g.room = None;
         g.host = false;
@@ -684,14 +702,18 @@ pub fn mark_read(cx: &mut App) {
 }
 
 /// The video to share from the Social page: the room video if one is open,
-/// otherwise the active tab's video.
+/// otherwise the active tab's video, then any tab's last video.
 pub fn current_video(cx: &App) -> Option<VideoItem> {
     if let Some(pe) = crate::ui::app::room_player(cx) {
         if let Some(v) = pe.read(cx).video.clone() {
             return Some(v);
         }
     }
-    crate::player::controller::player(cx).read(cx).video.clone()
+    crate::player::controller::player(cx)
+        .read(cx)
+        .video
+        .clone()
+        .or_else(|| crate::ui::app::recent_video(cx))
 }
 
 /// Menu items for the top-bar bell: the latest direct shares.
@@ -730,18 +752,18 @@ fn send_now(g: &Inner, line: &str) {
 
 // ── network ────────────────────────────────────────────────────────────────
 
-fn net_loop(relay: String, token: String, me: String, _name: String, tx: futures::channel::mpsc::UnboundedSender<Event>) {
+fn net_loop(relay: String, token: String, me: String, _name: String, conn_gen: u64, tx: futures::channel::mpsc::UnboundedSender<Event>) {
     let addr = match relay.to_socket_addrs().ok().and_then(|mut a| a.next()) {
         Some(a) => a,
         None => {
-            let _ = tx.unbounded_send(Event::Down(format!("bad relay address: {relay}")));
+            let _ = tx.unbounded_send(Event::Down(conn_gen, format!("bad relay address: {relay}")));
             return;
         }
     };
     let stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(8)) {
         Ok(s) => s,
         Err(e) => {
-            let _ = tx.unbounded_send(Event::Down(format!("could not reach relay: {e}")));
+            let _ = tx.unbounded_send(Event::Down(conn_gen, format!("could not reach relay: {e}")));
             return;
         }
     };
@@ -749,23 +771,23 @@ fn net_loop(relay: String, token: String, me: String, _name: String, tx: futures
     let mut wr = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
-            let _ = tx.unbounded_send(Event::Down(e.to_string()));
+            let _ = tx.unbounded_send(Event::Down(conn_gen, e.to_string()));
             return;
         }
     };
     let ctl = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
-            let _ = tx.unbounded_send(Event::Down(e.to_string()));
+            let _ = tx.unbounded_send(Event::Down(conn_gen, e.to_string()));
             return;
         }
     };
     if write_line(&mut wr, &format!("HELLO {token} {me}")).is_err() {
-        let _ = tx.unbounded_send(Event::Down("relay closed during hello".into()));
+        let _ = tx.unbounded_send(Event::Down(conn_gen, "relay closed during hello".into()));
         return;
     }
     let (line_tx, line_rx) = mpsc::channel::<String>();
-    let _ = tx.unbounded_send(Event::Connected(line_tx, ctl));
+    let _ = tx.unbounded_send(Event::Connected(conn_gen, line_tx, ctl));
     std::thread::spawn(move || writer(&mut wr, line_rx));
 
     let reader = BufReader::new(stream);
@@ -775,11 +797,11 @@ fn net_loop(relay: String, token: String, me: String, _name: String, tx: futures
         if line.is_empty() {
             continue;
         }
-        if tx.unbounded_send(Event::Line(line)).is_err() {
+        if tx.unbounded_send(Event::Line(conn_gen, line)).is_err() {
             return;
         }
     }
-    let _ = tx.unbounded_send(Event::Down("relay connection closed".into()));
+    let _ = tx.unbounded_send(Event::Down(conn_gen, "relay connection closed".into()));
 }
 
 fn writer(stream: &mut TcpStream, rx: Receiver<String>) {
@@ -809,14 +831,21 @@ fn write_line(stream: &mut TcpStream, line: &str) -> std::io::Result<()> {
 // ── relay events ───────────────────────────────────────────────────────────
 
 fn handle_event(cx: &mut App, ev: Event) {
+    let conn_gen = match &ev {
+        Event::Connected(g, _, _) | Event::Line(g, _) | Event::Down(g, _) => *g,
+    };
+    // Ignore anything left over from a replaced socket.
+    if cx.default_global::<Room>().inner.lock().unwrap().conn != conn_gen {
+        return;
+    }
     match ev {
-        Event::Connected(out, ctl) => {
+        Event::Connected(_, out, ctl) => {
             let r = cx.default_global::<Room>();
             let mut g = r.inner.lock().unwrap();
             g.out = Some(out);
             g.ctl = Some(ctl);
         }
-        Event::Down(reason) => {
+        Event::Down(_, reason) => {
             let was = {
                 let r = cx.default_global::<Room>();
                 let mut g = r.inner.lock().unwrap();
@@ -836,7 +865,7 @@ fn handle_event(cx: &mut App, ev: Event) {
             }
             cx.refresh_windows();
         }
-        Event::Line(line) => {
+        Event::Line(_, line) => {
             let mut dirty_ui = false;
             if let Some(rest) = line.strip_prefix("WELCOME ") {
                 let r = cx.default_global::<Room>();
@@ -1004,7 +1033,9 @@ fn apply_sync(cx: &mut App, s: &Sync, from_guest: bool) {
         if s.speed > 0.0 && (p.speed - s.speed).abs() > 0.001 {
             p.set_speed(s.speed);
         }
-        if !s.queue.is_empty() && (p.queue != s.queue || p.queue_pos != s.qpos) {
+        // Only a full state may touch the queue (and it may clear it); a
+        // heartbeat omits the queue.
+        if (s.full || !s.queue.is_empty()) && (p.queue != s.queue || p.queue_pos != s.qpos) {
             p.queue = s.queue.clone();
             p.queue_pos = s.qpos;
         }
@@ -1142,6 +1173,7 @@ fn tick(cx: &mut App) {
         speed,
         queue,
         qpos,
+        full: true,
         ..Default::default()
     };
     // A plain heartbeat carries only position/state. Video and queue are sent

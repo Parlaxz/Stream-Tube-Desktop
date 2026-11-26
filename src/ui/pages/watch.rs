@@ -1671,7 +1671,7 @@ fn vote_count(n: u64) -> String {
 }
 
 /// Likes / dislikes a video locally and on the signed-in account.
-fn set_rating(id: &str, r: i8, cx: &mut App) {
+pub(crate) fn set_rating(id: &str, r: i8, cx: &mut App) {
     store::set_rating(id, r);
     if crate::api::auth::signed_in() {
         let id = id.to_string();

@@ -40,7 +40,6 @@ pub enum KeyboardFeedback {
 }
 
 const SEEK_DISK_CACHE_LIMIT: u64 = 128 * 1024 * 1024;
-const BACK_CACHE_SIZE: &str = "12MiB";
 
 pub struct Player {
     /// speed to go back to while a press-and-hold plays at 2x
@@ -1384,7 +1383,12 @@ impl Player {
             if let Some(mpv) = &self.mpv {
                 // Write incoming packets to a temporary file while closing the gap.
                 // Their headers still use RAM even when the payload is on disk.
-                mpv.set("file-local-options/demuxer-max-back-bytes", if target.is_some() { "20MiB" } else { BACK_CACHE_SIZE });
+                // Restore the user's Back-cache setting afterwards; never
+                // replace it with a hard-coded value.
+                let back = store::settings_snapshot().read_ahead_back_mb;
+                let while_seeking = format!("{}MiB", back.max(20));
+                let after = format!("{back}MiB");
+                mpv.set("file-local-options/demuxer-max-back-bytes", if target.is_some() { &while_seeking } else { &after });
                 mpv.set("file-local-options/cache-on-disk", if target.is_some() { "yes" } else { "no" });
             }
         }

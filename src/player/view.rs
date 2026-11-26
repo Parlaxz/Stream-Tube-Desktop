@@ -1991,7 +1991,7 @@ impl PlayerView {
                         .child(div().w(px(96.)).px_3().py_1().rounded_lg().border_1().border_color(hsla(0., 0., 1., 0.2)).bg(hsla(0., 0., 0., 0.25)).child(Input::new(&self.ra_input).appearance(false)))
                         .child(div().text_xs().text_color(hsla(0., 0., 1., 0.6)).child("MB"))
                         .child(div().id("ra-apply").flex().items_center().px_3().h_8().rounded_lg().bg(hsla(0., 0., 1., 0.15)).cursor_pointer().text_sm().text_color(white()).child("Apply").on_click(cx.listener(|t, _, window, cx| {
-                            let mb = t.ra_input.read(cx).value().trim().parse::<u32>().unwrap_or(96).clamp(16, 4096);
+                            let mb = t.ra_input.read(cx).value().trim().parse::<u32>().unwrap_or(96).min(4096);
                             store::update_settings(|s| s.read_ahead_mb = mb);
                             crate::player::controller::apply_read_ahead(cx);
                             t.ra_input.update(cx, |i, cx| i.set_value(mb.to_string(), window, cx));

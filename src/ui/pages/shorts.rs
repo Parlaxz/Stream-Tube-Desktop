@@ -719,8 +719,30 @@ impl Render for ShortsPage {
                     .h(h)
                     .gap_4()
                     .pb_4()
-                    .child(action("sh-like", "thumbs-up", votes.as_ref().map(|v| compact_number(v.likes)).unwrap_or_else(|| "Like".into()), cx))
-                    .child(action("sh-dislike", "thumbs-down", votes.as_ref().map(|v| compact_number(v.dislikes)).unwrap_or_else(|| "Dislike".into()), cx))
+                    .child(action("sh-like", "thumbs-up", votes.as_ref().map(|v| compact_number(v.likes)).unwrap_or_else(|| "Like".into()), cx).on_click(cx.listener({
+                        let id = v.id.clone();
+                        let video = v.clone();
+                        move |_, _, _, cx| {
+                            let next = if store::rating(&id) == 1 { 0 } else { 1 };
+                            crate::ui::pages::watch::set_rating(&id, next, cx);
+                            if next == 1 {
+                                crate::room::activity("like", video.clone(), cx);
+                            }
+                            cx.notify();
+                        }
+                    })))
+                    .child(action("sh-dislike", "thumbs-down", votes.as_ref().map(|v| compact_number(v.dislikes)).unwrap_or_else(|| "Dislike".into()), cx).on_click(cx.listener({
+                        let id = v.id.clone();
+                        let video = v.clone();
+                        move |_, _, _, cx| {
+                            let next = if store::rating(&id) == -1 { 0 } else { -1 };
+                            crate::ui::pages::watch::set_rating(&id, next, cx);
+                            if next == -1 {
+                                crate::room::activity("dislike", video.clone(), cx);
+                            }
+                            cx.notify();
+                        }
+                    })))
                     .child({
                         let n = self.meta.get(&v.id).and_then(|w| w.comment_count_text.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Comments".into());
                         action("sh-comments", "message-square", n, cx).on_click(cx.listener(|t, _, _, cx| {

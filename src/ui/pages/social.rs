@@ -1,14 +1,12 @@
-//! Social page: a Home hub for rooms and activity, the room lobby, and
-//! connection/friend settings.
+//! Social page: a Home hub for rooms and activity, plus connection and friend
+//! settings.
 use crate::room;
-use crate::ui::cards::compact_row_with;
 use crate::ui::*;
 use gpui_kit::component::input::{Input, InputState};
 
 #[derive(Clone, Copy, PartialEq)]
 enum SocialTab {
     Home,
-    Room,
     Settings,
 }
 
@@ -143,9 +141,6 @@ impl Render for SocialPage {
         let snap = room::snapshot(cx);
         let connected = snap.status != room::Status::Offline;
         let in_room = snap.room.is_some();
-        if !in_room && self.tab == SocialTab::Room {
-            self.tab = SocialTab::Home;
-        }
         let (status, status_color): (&str, Hsla) = match snap.status {
             room::Status::Offline => ("Offline", p.text3),
             room::Status::Connecting => ("Connecting…", p.text2),
@@ -170,6 +165,11 @@ impl Render for SocialPage {
                                 let relay = this.relay.read(cx).value().trim().to_string();
                                 let token = this.token.read(cx).value().trim().to_string();
                                 let name = this.name.read(cx).value().trim().to_string();
+                                // A reconnect ends the old session cleanly: one
+                                // socket, and a room cannot outlive its relay.
+                                if room::snapshot(cx).status != room::Status::Offline {
+                                    room::disconnect(cx);
+                                }
                                 room::save_settings(relay, token, name, cx);
                                 room::connect(cx);
                                 cx.notify();
@@ -291,12 +291,11 @@ impl Render for SocialPage {
                     .child(div().text_sm().text_color(p.text).child(format!("Room {}", info.id)))
                     .child(div().text_xs().text_color(p.text2).child(role)))
                 .child(div().flex().items_center().gap_2()
-                    .child(button("room-open-lobby", "Open lobby", p, true).on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = SocialTab::Room;
-                        cx.notify();
+                    .child(button("room-open-lobby", "Open room", p, true).on_click(cx.listener(|_, _, _, cx| {
+                        crate::ui::app::open_room(cx);
                     })))
                     .child(button("room-leave", "Leave room", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                        room::leave_room(cx);
+                        crate::ui::app::close_room(cx);
                         cx.notify();
                     }))));
         } else {
@@ -388,91 +387,6 @@ impl Render for SocialPage {
             }
         }
 
-        // ── room tab: the lobby ──
-        let mut lobby = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Room lobby"));
-        if let Some(info) = &snap.room {
-            let role = if snap.host { "You are hosting" } else { "You are a guest" };
-            let pe = crate::ui::app::room_player(cx);
-            let (current, queue, qpos) = match &pe {
-                Some(pe) => {
-                    let r = pe.read(cx);
-                    (r.video.clone(), r.queue.clone(), r.queue_pos)
-                }
-                None => (None, Vec::new(), None),
-            };
-            lobby = lobby
-                .child(div().flex().items_center().gap_2()
-                    .child(div().text_sm().text_color(p.text).child(format!("Room {}", info.id)))
-                    .child(div().text_xs().text_color(p.text2).child(role)))
-                .child(div().flex().items_center().gap_2()
-                    .child(button("social-open-room", "Open room tab", p, true).on_click(cx.listener(|_, _, _w, cx| {
-                        crate::ui::app::open_room(cx);
-                    })))
-                    .child(button("social-leave-room", "Leave room", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                        room::leave_room(cx);
-                        cx.notify();
-                    }))));
-            if let Some(v) = &current {
-                lobby = lobby.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_base()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.text)
-                                .child(crate::ui::widgets::selectable_text(format!("social-room-video-{}", v.id), v.title.clone())),
-                        )
-                        .child(div().text_xs().text_color(p.text2).child(v.channel_name.clone())),
-                );
-            } else {
-                lobby = lobby.child(div().text_sm().text_color(p.text3).child("Nothing is playing yet."));
-            }
-            lobby = lobby.child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.text).child(format!("Queue ({})", queue.len())));
-            if queue.is_empty() {
-                lobby = lobby.child(div().text_sm().text_color(p.text3).child("The room queue is empty. Add videos from any tab."));
-            }
-            for (i, v) in queue.iter().enumerate() {
-                let remover = pe.clone();
-                let extra = vec![crate::ui::app::MenuItem::new("list-x", "Remove from queue", move |_, cx| {
-                    if let Some(pe) = &remover {
-                        pe.update(cx, |p, cx| {
-                            if i < p.queue.len() {
-                                p.queue.remove(i);
-                                if let Some(cur) = p.queue_pos.filter(|c| *c > i) {
-                                    p.queue_pos = Some(cur - 1);
-                                }
-                                cx.notify();
-                            }
-                        });
-                    }
-                })];
-                lobby = lobby.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(div().w_5().text_xs().text_color(p.text2).text_center().child(if qpos == Some(i) { "▶".to_string() } else { (i + 1).to_string() }))
-                        .child(compact_row_with(
-                            v,
-                            qpos == Some(i),
-                            Some(std::sync::Arc::new(move |_, cx: &mut App| room::play_index(i, cx))),
-                            extra,
-                            cx,
-                        )),
-                );
-            }
-        } else {
-            lobby = lobby
-                .child(div().text_sm().text_color(p.text2).child("You are not in a room. Create or join one from Home."))
-                .child(button("social-room-home", "Go to Home", p, false).on_click(cx.listener(|this, _, _, cx| {
-                    this.tab = SocialTab::Home;
-                    cx.notify();
-                })));
-        }
-
         // ── compose ──
         let mut content = div().flex().flex_col().gap_4();
         match self.tab {
@@ -501,9 +415,8 @@ impl Render for SocialPage {
                         this.tab = SocialTab::Settings;
                         cx.notify();
                     })))
-                    .when(in_room, |d| d.child(button("social-go-room", "Room lobby", p, true).on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = SocialTab::Room;
-                        cx.notify();
+                    .when(in_room, |d| d.child(button("social-go-room", "Open room", p, true).on_click(cx.listener(|_, _, _, cx| {
+                        crate::ui::app::open_room(cx);
                     })))));
                 content = content.child(status_card).child(room_card).child(rooms);
                 if let Some(share) = share_card {
@@ -511,16 +424,12 @@ impl Render for SocialPage {
                 }
                 content = content.child(shared).child(acts);
             }
-            SocialTab::Room => {
-                content = content.child(lobby);
-            }
             SocialTab::Settings => {
                 content = content.child(conn).child(friends);
             }
         }
 
         let tab_home_active = self.tab == SocialTab::Home;
-        let tab_room_active = self.tab == SocialTab::Room;
         let tab_settings_active = self.tab == SocialTab::Settings;
         let bar = div()
             .flex()
@@ -535,11 +444,8 @@ impl Render for SocialPage {
             )
             .when(in_room, |d| {
                 d.child(
-                    tab_pill("social-tab-room", "Room", tab_room_active, true, p)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.tab = SocialTab::Room;
-                            cx.notify();
-                        })),
+                    tab_pill("social-tab-room", "Room", false, true, p)
+                        .on_click(cx.listener(|_, _, _, cx| crate::ui::app::open_room(cx))),
                 )
             })
             .when(!in_room, |d| d.child(tab_pill("social-tab-room", "Room", false, false, p)))

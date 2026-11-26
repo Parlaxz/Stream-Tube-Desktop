@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.6
+
+### Fixed
+
+- Opening a room switches to the room tab; inserting it no longer corrupts the active tab.
+- The room tab shows its video, and the mini player no longer duplicates it.
+- Settings → About renders the changelog as Markdown instead of raw `#` and `-`.
+- Read ahead no longer has a 16 MB floor, and Back cache no longer resets to a hard-coded 12 MiB after a seek; it restores your value.
+- Shorts Like/Dislike save the rating, update the account when signed in, and share the activity.
+- The tab-bar **+** opens the tab overview instead of doing nothing.
+- Social has **Home**, **Room** and **Settings** again; Room is enabled in a room and opens the lobby.
+- Reconnecting no longer leaks the old socket or lets a stale disconnect clear the new room.
+- Leaving a room closes its tab and stops playback.
+- A remote queue can be cleared, and room tabs are not restored without a room session.
+- Social Share/Send uses the last video from any tab, not only the active tab.
+
+### Changed
+
+- Changelog corrections: removed the false PiP-on-Settings claim, the delta-shipped-in-0.11.2 claim, and “room right after Home”.
+
 ## 0.11.5
 
 ### Updates
@@ -34,7 +54,7 @@
 
 ### Updates
 
-- First delta update: 0.11.2 → 0.11.3 ships as a small exe patch, so 0.11.2 can update in place instead of downloading the full installer.
+- Delta updates ship in 0.11.3. This is the first build that can apply an exe patch, so the first effective delta is 0.11.3 → 0.11.4; 0.11.2 clients still need the full installer.
 
 ## 0.11.2
 
@@ -51,19 +71,15 @@
 - A video keeps playing when you switch tabs or go Home. Starting another video pauses the previous one.
 - **Volume boost** is a toggle that really raises the slider to **500%**; it now raises mpv's `volume-max` instead of only changing the UI.
 - **Read ahead** and **Back cache** are text boxes with an **Apply** button.
-- The top-bar **Settings** button opens Settings in its own tab (or the existing Settings tab) and keeps the video in picture-in-picture. The crash from opening Settings while watching is fixed.
+- The top-bar **Settings** button opens Settings in its own tab (or the existing Settings tab) and leaves the video playing in its tab. The crash from opening Settings while watching is fixed.
 
 ### Rooms and social
 
 - Rooms are advertised to friends. Join a friend's room from **Social → Friends' rooms** without an invite.
-- A room opens in a tab right after Home and shows the current video and the room queue.
+- A room opens in its own tab and shows the current video and the room queue.
 - **Share** is a menu now: **Copy link** or **Share with friends**.
 - The Social page hides connection fields when connected, lists friends' rooms, and stays centered.
 - Selectable titles and comments have a right-click **Copy selected text**. A link does not open when you have selected text.
-
-### Updates
-
-- Updates try a **bidiff delta of `streamtube.exe`** first: about 3.7 MB in testing instead of the 43 MB installer. The patch is checksum-verified, the new exe replaces the old one on restart, and the full installer remains the fallback. `release.bat` builds and uploads the patch.
 
 ## 0.11.1
 
@@ -78,7 +94,7 @@
 - A video keeps playing when you switch to another tab or Home. Starting another video pauses the previous one.
 - **Volume boost** is a toggle now: it raises the volume slider's cap to **500%** and adds no audio gain.
 - **Read ahead** and **Back cache** have sliders in the player's cog menu, with the presets still there.
-- The top-bar **Settings** button opens Settings in its own tab (or the existing Settings tab) and keeps the video in picture-in-picture.
+- The top-bar **Settings** button opens Settings in its own tab (or the existing Settings tab) and leaves the video playing in its tab.
 
 ### Reading
 
