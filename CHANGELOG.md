@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0
+
+### Tabs
+
+- Close a tab from the tab overview with its **X** button or a middle-click on the card. The pinned Home tab stays open.
+- Click a channel name in the tab overview to open the channel. Middle-click or Ctrl/Cmd+click opens it in a new background tab.
+- Tab overview cards respond on hover and fade out when closed. The overview stays open after a tab closes.
+- Background tabs keep channel names and links, including after a restart.
+
 ## 0.10.1
 
 ### Fixed

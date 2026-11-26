@@ -180,7 +180,8 @@ fn parse_link_time(t: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod link_tests {
-    use super::{Route, parse_link_time, route_from_link};
+    use super::{Route, SavedTabs, TabChannel, parse_link_time, route_from_link, tab_channel};
+    use crate::api::types::VideoItem;
 
     #[test]
     fn links_keep_time_and_playlist() {
@@ -192,6 +193,31 @@ mod link_tests {
         assert!(matches!(r, Some(Route::Watch { start: None, playlist: None, .. })), "{r:?}");
         assert_eq!(parse_link_time("1h2m3s"), Some(3723.0));
         assert_eq!(parse_link_time("abc"), None);
+    }
+
+    #[test]
+    fn tab_channels_follow_the_video_and_survive_saved_tabs() {
+        let route = Route::Watch { id: "video".into(), playlist: None, start: None };
+        let video = VideoItem {
+            id: "video".into(), channel_id: Some("channel".into()), channel_name: "Creator".into(), channel_avatar: Some("avatar".into()),
+            ..Default::default()
+        };
+        let saved = TabChannel::from(&video);
+        assert_eq!(tab_channel(&route, None, Some(&saved)).unwrap().id.as_deref(), Some("channel"));
+        let other = VideoItem { id: "other".into(), ..video.clone() };
+        assert_eq!(tab_channel(&route, Some(&other), Some(&saved)).unwrap().name, "Creator");
+        let updated = VideoItem { channel_name: "Updated".into(), ..video };
+        assert_eq!(tab_channel(&route, Some(&updated), Some(&saved)).unwrap().name, "Updated");
+        assert!(tab_channel(&Route::Home, Some(&updated), Some(&saved)).is_none());
+        assert!(tab_channel(&Route::Shorts(Some("other".into())), Some(&updated), Some(&saved)).is_none());
+
+        let old = r#"{"tabs":[{"route":{"Watch":{"id":"video","playlist":null,"start":null}},"title":"Video","channel":"avatar"}],"active":0}"#;
+        let mut tabs: SavedTabs = serde_json::from_str(old).unwrap();
+        assert!(tabs.tabs[0].channel_info.is_none());
+        tabs.tabs[0].channel_info = Some(saved);
+        let restored: SavedTabs = serde_json::from_str(&serde_json::to_string(&tabs).unwrap()).unwrap();
+        assert_eq!(restored.tabs[0].channel_info.as_ref().unwrap().name, "Creator");
+        assert_eq!(restored.tabs[0].channel.as_deref(), Some("avatar"));
     }
 }
 
@@ -212,7 +238,7 @@ pub fn navigate_titled(route: Route, title: Option<String>, window: &mut Window,
 }
 
 /// Opens a page in a new tab, in the background unless `switch` is set.
-pub fn open_in_new_tab(route: Route, title: Option<String>, channel: Option<String>, switch: bool, window: &mut Window, cx: &mut App) {
+pub fn open_in_new_tab(route: Route, title: Option<String>, channel: Option<TabChannel>, switch: bool, window: &mut Window, cx: &mut App) {
     if let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) {
         app.update(cx, |a, cx| a.new_tab(route, title, channel, switch, window, cx));
     }
@@ -220,7 +246,7 @@ pub fn open_in_new_tab(route: Route, title: Option<String>, channel: Option<Stri
 
 /// Ctrl/Cmd+left click or a middle click opens `route` in a new tab; a plain
 /// left click navigates in place. Both gestures call this so they behave the same.
-pub fn activate(route: Route, title: Option<String>, channel: Option<String>, ev: &ClickEvent, window: &mut Window, cx: &mut App) {
+pub fn activate(route: Route, title: Option<String>, channel: Option<TabChannel>, ev: &ClickEvent, window: &mut Window, cx: &mut App) {
     if ev.is_middle_click() {
         // a middle click on a video opens a tab; it is not an empty-space autoscroll
         crate::ui::widgets::autoscroll_cancel();
@@ -571,8 +597,8 @@ struct Tab {
     /// Title from the card this tab was opened from, so a background tab can
     /// show it without building a page or fetching anything.
     title: Option<String>,
-    /// Channel avatar from the card, for the tab grid.
-    channel: Option<String>,
+    /// Channel details from the card, without loading a background tab's page.
+    channel: Option<TabChannel>,
     /// built the first time the tab is shown, so a video opened in the
     /// background doesn't start playing on its own
     page: Option<AnyView>,
@@ -581,6 +607,28 @@ struct Tab {
     /// Each tab owns its player and mpv engine, so parked tabs keep their
     /// loaded video data (and exact position) in memory.
     player: Entity<Player>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TabChannel {
+    video_id: String,
+    id: Option<String>,
+    name: String,
+    avatar: Option<String>,
+}
+
+impl From<&VideoItem> for TabChannel {
+    fn from(video: &VideoItem) -> Self {
+        Self { video_id: video.id.clone(), id: video.channel_id.clone(), name: video.channel_name.clone(), avatar: video.channel_avatar.clone() }
+    }
+}
+
+fn tab_channel(route: &Route, video: Option<&VideoItem>, saved: Option<&TabChannel>) -> Option<TabChannel> {
+    let id = match route {
+        Route::Watch { id, .. } | Route::Shorts(Some(id)) => id,
+        _ => return None,
+    };
+    video.filter(|v| &v.id == id).map(TabChannel::from).or_else(|| saved.filter(|c| &c.video_id == id).cloned())
 }
 
 /// Drag payload for reordering tabs in the rail and the tab grid.
@@ -630,6 +678,8 @@ struct SavedTab {
     route: Route,
     title: Option<String>,
     channel: Option<String>,
+    #[serde(default)]
+    channel_info: Option<TabChannel>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -709,6 +759,7 @@ pub struct AppView {
     tab_grid_open: bool,
     /// use sqrt-based column count instead of the default 6
     tab_grid_dynamic: bool,
+    closing_grid_tabs: Vec<u64>,
     _subs: Vec<Subscription>,
 }
 
@@ -789,9 +840,15 @@ impl AppView {
                     }
                     tabs.push(Tab {
                         id,
-                        route: st.route,
+                        route: st.route.clone(),
                         title: st.title,
-                        channel: st.channel,
+                        channel: st.channel_info.or_else(|| {
+                            let video_id = match &st.route {
+                                Route::Watch { id, .. } | Route::Shorts(Some(id)) => id.clone(),
+                                _ => return None,
+                            };
+                            st.channel.map(|avatar| TabChannel { video_id, id: None, name: String::new(), avatar: Some(avatar) })
+                        }),
                         page: None,
                         history: Vec::new(),
                         forward: Vec::new(),
@@ -969,6 +1026,7 @@ impl AppView {
             right_down: false,
             tab_grid_open: false,
             tab_grid_dynamic: store::kv_get("tab_grid_dynamic").as_deref() == Some("1"),
+            closing_grid_tabs: Vec::new(),
             _subs: subs,
         }
     }
@@ -1460,7 +1518,7 @@ impl AppView {
         }
     }
 
-    pub fn new_tab(&mut self, route: Route, title: Option<String>, channel: Option<String>, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn new_tab(&mut self, route: Route, title: Option<String>, channel: Option<TabChannel>, switch: bool, window: &mut Window, cx: &mut Context<Self>) {
         match &route {
             Route::Channel(id) | Route::Playlist(id) | Route::Watch { id, .. } if id.is_empty() => return,
             _ => {}
@@ -1570,6 +1628,25 @@ impl AppView {
             let i = (self.active_tab as isize + step).rem_euclid(n) as usize;
             self.switch_tab(i, window, cx);
         }
+    }
+
+    fn close_grid_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if id == 0 || self.closing_grid_tabs.contains(&id) {
+            return;
+        }
+        self.closing_grid_tabs.push(id);
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(140)).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.closing_grid_tabs.retain(|closing| *closing != id);
+                if let Some(index) = this.tabs.iter().position(|tab| tab.id == id) {
+                    this.close_tab(index, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Live drag-to-reorder: when the pointer enters another tab, the dragged
@@ -1799,15 +1876,9 @@ impl AppView {
             let active = i == self.active_tab;
             let route = if active { self.route.clone() } else { tab.route.clone() };
             let title = Some(Self::tab_label(&route, if active { None } else { tab.title.as_deref() }, &tab.player, cx));
-            let channel = tab.channel.clone().or_else(|| {
-                let video = tab.player.read(cx).video.clone()?;
-                match &route {
-                    Route::Watch { id, .. } if &video.id == id => video.channel_avatar.clone(),
-                    Route::Shorts(Some(id)) if &video.id == id => video.channel_avatar.clone(),
-                    _ => None,
-                }
-            });
-            tabs.push(SavedTab { route, title, channel });
+            let channel_info = tab_channel(&route, tab.player.read(cx).video.as_ref(), tab.channel.as_ref());
+            let channel = channel_info.as_ref().and_then(|c| c.avatar.clone());
+            tabs.push(SavedTab { route, title, channel, channel_info });
         }
         let state = SavedTabs { tabs, active: self.active_tab };
         if let Ok(s) = serde_json::to_string(&state) {
@@ -1849,7 +1920,7 @@ impl AppView {
         let modal_h = (f32::from(vp.height) * 0.9).max(240.);
         let gap = 12.0;
         let item_w = ((modal_w - 32.0 - gap * cols.saturating_sub(1) as f32) / cols as f32).max(48.);
-        let item_h = item_w * 9.0 / 16.0;
+        let item_h = (item_w - 16.).max(32.) * 9.0 / 16.0;
 
         let mut grid = div().grid().grid_cols(cols.min(u16::MAX as usize) as u16).gap_3();
         for i in 0..self.tabs.len() {
@@ -1864,14 +1935,7 @@ impl AppView {
                 _ => None,
             };
             let is_video = thumb.is_some();
-            let channel = tab.channel.clone().or_else(|| {
-                let video = tab.player.read(cx).video.clone()?;
-                match &route {
-                    Route::Watch { id, .. } if &video.id == id => video.channel_avatar.clone(),
-                    Route::Shorts(Some(id)) if &video.id == id => video.channel_avatar.clone(),
-                    _ => None,
-                }
-            });
+            let channel = tab_channel(&route, tab.player.read(cx).video.as_ref(), tab.channel.as_ref());
             let id = tab.id;
             let picture = match thumb {
                 Some(t) => img(t).size_full().object_fit(ObjectFit::Cover).into_any_element(),
@@ -1885,12 +1949,12 @@ impl AppView {
             };
             let mut heading = div().flex().items_center().gap_2().min_w_0();
             if is_video {
-                if let Some(a) = &channel {
+                if let Some(a) = channel.as_ref().and_then(|c| c.avatar.as_ref()) {
                     heading = heading.child(avatar(Some(a.as_str()), px(22.), &label, cx));
                 }
             }
             let drag_label: SharedString = label.clone().into();
-            heading = heading.child(
+            let mut text = div().flex().flex_col().flex_1().min_w_0().gap_1().child(
                 div()
                     .flex_1()
                     .min_w_0()
@@ -1899,6 +1963,45 @@ impl AppView {
                     .text_color(if active { p.text } else { p.text2 })
                     .child(label),
             );
+            if let Some(channel) = channel.filter(|c| !c.name.is_empty()) {
+                let channel_id = channel.id.filter(|id| !id.is_empty());
+                let route = channel_id.map(Route::Channel);
+                let aux_route = route.clone();
+                let name = channel.name;
+                let aux_name = name.clone();
+                let display_name = name.clone();
+                text = text.child(
+                    div()
+                        .id(("tg-channel", id))
+                        .text_xs()
+                        .text_color(p.text2)
+                        .truncate()
+                        .when(route.is_some(), |d| d.cursor_pointer().hover(|s| s.text_color(p.text).underline()))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(route) = route.clone() {
+                                if ev.modifiers().secondary(cx) {
+                                    this.new_tab(route, Some(name.clone()), None, false, window, cx);
+                                } else {
+                                    this.tab_grid_open = false;
+                                    this.go(route, window, cx);
+                                }
+                            }
+                        }))
+                        .on_aux_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                            if ev.is_middle_click() {
+                                cx.stop_propagation();
+                                crate::ui::widgets::autoscroll_cancel();
+                                if let Some(route) = aux_route.clone() {
+                                    this.new_tab(route, Some(aux_name.clone()), None, false, window, cx);
+                                }
+                            }
+                        }))
+                        .child(display_name),
+                );
+            }
+            heading = heading.child(text);
             grid = grid.child(
                 div()
                     .id(("tg-item", id))
@@ -1906,13 +2009,27 @@ impl AppView {
                     .flex_col()
                     .w_full()
                     .gap_2()
+                    .p_2()
+                    .rounded_xl()
+                    .hover(|d| d.bg(p.hover))
+                    .active(|d| d.bg(p.surface2))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.closing_grid_tabs.contains(&id) {
+                            return;
+                        }
                         if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
                             this.switch_tab(i, window, cx);
                         }
                         this.tab_grid_open = false;
                         cx.notify();
+                    }))
+                    .on_aux_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                        if ev.is_middle_click() {
+                            cx.stop_propagation();
+                            crate::ui::widgets::autoscroll_cancel();
+                            this.close_grid_tab(id, window, cx);
+                        }
                     }))
                     // the pinned Home tab stays first, so it does not drag
                     .when(id != 0, |d| {
@@ -1933,9 +2050,37 @@ impl AppView {
                             .rounded_lg()
                             .bg(p.surface2)
                             .when(active, |d| d.border_2().border_color(p.accent))
-                            .child(picture),
+                            .child(picture)
+                            .when(id != 0, |d| {
+                                d.child(
+                                    icon_button(("tg-tab-close", id), "x", cx)
+                                        .absolute()
+                                        .top_1()
+                                        .right_1()
+                                        .bg(p.surface)
+                                        .active(|s| s.bg(p.accent))
+                                        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(t("Close tab")).build(window, cx))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.close_grid_tab(id, window, cx);
+                                        })),
+                                )
+                            }),
                     )
-                    .child(heading),
+                    .child(heading)
+                    .map(|card| {
+                        if self.closing_grid_tabs.contains(&id) {
+                            card.with_animation(
+                                ("tg-closing", id),
+                                Animation::new(std::time::Duration::from_millis(140)).with_easing(ease_out_quint()),
+                                |card, delta| card.opacity(1.0 - delta),
+                            )
+                            .into_any_element()
+                        } else {
+                            card.into_any_element()
+                        }
+                    }),
             );
         }
 

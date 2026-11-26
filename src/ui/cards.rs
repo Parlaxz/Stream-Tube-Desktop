@@ -219,7 +219,7 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     {
         let route = if v.is_short { Route::Shorts(Some(v.id.clone())) } else { Route::Watch { id: v.id.clone(), playlist: None, start: None } };
         let title = v.title.clone();
-        let channel = v.channel_avatar.clone();
+        let channel = Some(crate::ui::app::TabChannel::from(v));
         items.push(MenuItem::new("app-window", "Open in new tab", move |window, cx| {
             crate::ui::app::open_in_new_tab(route.clone(), Some(title.clone()), channel.clone(), false, window, cx)
         }));
@@ -428,7 +428,7 @@ pub fn video_card(v: &VideoItem, width: Pixels, show_channel: bool, cx: &mut App
     let route = watch_route(v);
     let route_aux = route.clone();
     let title_aux = tab_title.clone();
-    let channel = v.channel_avatar.clone();
+    let channel = Some(crate::ui::app::TabChannel::from(v));
     let channel_aux = channel.clone();
     let channel_route = v.channel_id.clone().map(Route::Channel);
     let meta = meta_line(v);
@@ -522,7 +522,7 @@ pub fn shorts_card(v: &VideoItem, width: Pixels, cx: &mut App) -> AnyElement {
         Route::Shorts(Some(id.clone()))
     };
     let route_aux = route.clone();
-    let channel = v.channel_avatar.clone();
+    let channel = Some(crate::ui::app::TabChannel::from(v));
     let channel_aux = channel.clone();
     let meta = meta_line(v);
     let h = width * (16. / 9.);
@@ -564,7 +564,7 @@ pub fn video_row(v: &VideoItem, thumb_w: Pixels, cx: &mut App) -> AnyElement {
     let route = watch_route(v);
     let route_aux = route.clone();
     let title_aux = tab_title.clone();
-    let channel = v.channel_avatar.clone();
+    let channel = Some(crate::ui::app::TabChannel::from(v));
     let channel_aux = channel.clone();
     let channel_route = v.channel_id.clone().map(Route::Channel);
     let meta = meta_line(v);
@@ -650,7 +650,7 @@ pub fn compact_row_with(v: &VideoItem, active: bool, on_click: Option<Arc<dyn Fn
     let route_aux = route.clone();
     let tab_title = title.clone();
     let title_aux = tab_title.clone();
-    let channel = v.channel_avatar.clone();
+    let channel = Some(crate::ui::app::TabChannel::from(v));
     let channel_aux = channel.clone();
     let channel_route = v.channel_id.clone().map(Route::Channel);
     let cname = v.channel_name.clone();
