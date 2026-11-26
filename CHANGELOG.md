@@ -35,10 +35,6 @@
 
 - **Settings → General → App language** offers English, Azerbaijani, French, German, Japanese, Kazakh, Russian, Turkish, Ukrainian, Simplified Chinese and Traditional Chinese. YouTube and caption languages follow it until you choose them separately.
 
-### Shorts
-
-- Upcoming Shorts are preloaded, so moving to the next one starts faster.
-
 ### Updates and packaging
 
 - Portable Windows builds can update in place, keeping settings and history.
