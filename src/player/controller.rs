@@ -68,6 +68,8 @@ pub struct Player {
     seek_disk_bytes: u64,
     preloaded_until: f64,
     pub volume: f64,
+    /// Extra gain for the current video only (0 = off, 0.5 = +50%). Reset on play.
+    pub volume_boost: f64,
     pub muted: bool,
     pub speed: f64,
     keyboard_feedback: Option<(KeyboardFeedback, Task<()>)>,
@@ -183,6 +185,15 @@ fn eq_filter(id: &str) -> &'static str {
     EQ_PRESETS.iter().find(|&&(k, _, _)| k == id).map(|&(_, _, f)| f).unwrap_or("")
 }
 
+/// The mpv audio filter chain: the equalizer preset plus an optional per-video gain.
+fn audio_filters(eq: &str, boost: f64) -> String {
+    if boost <= 0.0 {
+        return eq.to_string();
+    }
+    let volume = format!("volume={:.2}", 1.0 + boost);
+    if eq.is_empty() { volume } else { format!("{eq},{volume}") }
+}
+
 impl Player {
     fn new(cx: &mut Context<Self>) -> Self {
         let s = store::settings_snapshot();
@@ -208,6 +219,7 @@ impl Player {
             seek_disk_bytes: 0,
             preloaded_until: 0.0,
             volume: s.volume,
+            volume_boost: 0.0,
             muted: false,
             speed: s.default_speed,
             boost: None,
@@ -744,6 +756,9 @@ impl Player {
             cx.notify();
             return;
         };
+        // The boost belongs to the video it was turned on for.
+        self.volume_boost = 0.0;
+        mpv.set("af", &audio_filters(eq_filter(&store::settings_snapshot().eq_preset), 0.0));
         self.load_serial += 1;
         self.fallback_tried = false;
         self.recovering_picture = false;
@@ -1393,12 +1408,24 @@ impl Player {
     }
 
     pub fn set_eq_preset(&mut self, preset: &str) {
-        let filter = eq_filter(preset);
+        let filter = audio_filters(eq_filter(preset), self.volume_boost);
         if let Some(m) = &self.mpv {
-            m.set("af", filter);
+            m.set("af", &filter);
         }
         let p = if EQ_PRESETS.iter().any(|&(k, _, _)| k == preset) { preset } else { "flat" };
         store::update_settings(|s| s.eq_preset = p.to_string());
+    }
+
+    /// Extra gain for the current video only; the next video starts without it.
+    pub fn set_volume_boost(&mut self, boost: f64, cx: &mut Context<Self>) {
+        self.volume_boost = boost.max(0.0);
+        let eq = eq_filter(&store::settings_snapshot().eq_preset);
+        if let Some(m) = &self.mpv {
+            m.set("af", &audio_filters(eq, self.volume_boost));
+        }
+        let label = if self.volume_boost <= 0.0 { "off".to_string() } else { format!("+{}%", (self.volume_boost * 100.0).round() as i32) };
+        toast(cx, format!("Volume boost: {label}"));
+        cx.notify();
     }
 
     pub fn toggle_mute(&mut self) {
@@ -2106,5 +2133,19 @@ mod seek_tests {
         assert_eq!(clamp_seek(5.0, 0.0), 5.0);
         assert_eq!(clamp_seek(0.05, 0.05), 0.0);
         assert_eq!(clamp_seek(0.1, 0.1), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod volume_boost_tests {
+    use super::audio_filters;
+
+    #[::core::prelude::v1::test]
+    fn joins_the_equalizer_and_the_per_video_gain() {
+        assert_eq!(audio_filters("", 0.0), "");
+        assert_eq!(audio_filters("", 0.5), "volume=1.50");
+        assert_eq!(audio_filters("", 1.0), "volume=2.00");
+        assert_eq!(audio_filters("equalizer=f=60:w=1", 0.0), "equalizer=f=60:w=1");
+        assert_eq!(audio_filters("equalizer=f=60:w=1", 1.0), "equalizer=f=60:w=1,volume=2.00");
     }
 }

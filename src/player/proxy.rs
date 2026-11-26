@@ -825,6 +825,11 @@ mod live_proxy_tests {
             assert!(Instant::now() < deadline, "no decoded video within 30s (time {time}, width {width})");
             std::thread::sleep(Duration::from_millis(250));
         }
+        // the gain the cog menu applies must be a filter mpv accepts
+        mpv.set("af", "volume=1.50");
+        let af = mpv.get_string("af").unwrap_or_default();
+        eprintln!("af after boost: {af}");
+        assert!(af.contains("volume"), "mpv rejected the volume boost filter: {af:?}");
         let _ = mpv.command(&["quit"]);
     }
 }

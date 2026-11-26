@@ -72,6 +72,9 @@ enum Menu {
     Audio,
     Equalizer,
     Aspect,
+    VolumeBoost,
+    ReadAhead,
+    ReadBack,
 }
 
 pub struct PlayerView {
@@ -1754,6 +1757,22 @@ impl PlayerView {
                         row("m-eq".into(), Some("sliders-horizontal"), translate("Equalizer").into(), Some(cur), false)
                             .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::Equalizer); cx.notify() }))
                     })
+                    .child({
+                        let boost = pl.volume_boost;
+                        let label = if boost <= 0.0 { "Off".to_string() } else { format!("+{}%", (boost * 100.0).round() as i32) };
+                        row("m-vb".into(), Some("gauge"), "Volume boost".into(), Some(label), false)
+                            .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::VolumeBoost); cx.notify() }))
+                    })
+                    .child({
+                        let mb = store::settings_snapshot().read_ahead_mb;
+                        row("m-ra".into(), Some("download"), "Read ahead".into(), Some(format!("{mb} MB")), false)
+                            .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::ReadAhead); cx.notify() }))
+                    })
+                    .child({
+                        let mb = store::settings_snapshot().read_ahead_back_mb;
+                        row("m-rb".into(), Some("hard-drive"), "Back cache".into(), Some(format!("{mb} MB")), false)
+                            .on_click(cx.listener(|t, _, _, cx| { t.menu = Some(Menu::ReadBack); cx.notify() }))
+                    })
                     .child(
                         row("m-ao".into(), Some("headphones"), translate("Audio only (background)").into(), Some(translate(if audio_only { "On" } else { "Off" }).into()), false)
                             .on_click(cx.listener(move |t, _, _, cx| t.player.update(cx, |p, cx| p.set_audio_only(!audio_only, cx)))),
@@ -1921,6 +1940,38 @@ impl PlayerView {
                     panel = panel.child(row(SharedString::from(format!("ar-{value}")), None, translate(label).into(), None, cur == value).on_click(cx.listener(move |t, _, _, cx| {
                         t.menu = None;
                         set_aspect_mode(value, cx);
+                    })));
+                }
+            }
+            Menu::VolumeBoost => {
+                let cur = pl.volume_boost;
+                panel = panel.child(header("Volume boost", cx));
+                for (boost, label) in [(0.0, "Off"), (0.5, "+50%"), (1.0, "+100%")] {
+                    panel = panel.child(row(SharedString::from(format!("vb-{}", (boost * 100.0) as i32)), None, label.into(), None, (cur - boost).abs() < 0.001).on_click(cx.listener(move |t, _, _, cx| {
+                        t.menu = None;
+                        t.player.update(cx, |p, cx| p.set_volume_boost(boost, cx));
+                    })));
+                }
+            }
+            Menu::ReadAhead => {
+                let cur = store::settings_snapshot().read_ahead_mb;
+                panel = panel.child(header("Read ahead", cx));
+                for mb in [48u32, 96, 192, 384, 768] {
+                    panel = panel.child(row(SharedString::from(format!("ra-{mb}")), None, format!("{mb} MB"), None, cur == mb).on_click(cx.listener(move |t, _, _, cx| {
+                        t.menu = None;
+                        store::update_settings(|s| s.read_ahead_mb = mb);
+                        crate::player::controller::apply_read_ahead(cx);
+                    })));
+                }
+            }
+            Menu::ReadBack => {
+                let cur = store::settings_snapshot().read_ahead_back_mb;
+                panel = panel.child(header("Back cache", cx));
+                for mb in [8u32, 24, 64, 128, 256] {
+                    panel = panel.child(row(SharedString::from(format!("rb-{mb}")), None, format!("{mb} MB"), None, cur == mb).on_click(cx.listener(move |t, _, _, cx| {
+                        t.menu = None;
+                        store::update_settings(|s| s.read_ahead_back_mb = mb);
+                        crate::player::controller::apply_read_ahead(cx);
                     })));
                 }
             }

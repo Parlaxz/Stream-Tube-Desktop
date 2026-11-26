@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.1
+
+### Fixed
+
+- Playback works again: local HLS URLs now carry the proxy's session token. 0.10.0 refused every video with a 403.
+
+### Player
+
+- **Volume boost** in the player's cog menu: **Off**, **+50%** or **+100%**. It applies to the current video only; the next video starts at normal volume.
+- **Read ahead** and **Back cache** are now in the cog menu too, with presets from 48 to 768 MB and 8 to 256 MB. They apply to every open player immediately, like the same boxes in Settings → Custom Features.
+
 ## 0.10.0
 
 ### Upstream sync
