@@ -57,7 +57,7 @@ pub struct Invite {
 
 /// One wire message. `kind` is "invite", "join", "intent" (guest -> host) or
 /// "state" (host -> room).
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Sync {
     #[serde(rename = "t")]
     pub kind: String,
@@ -79,10 +79,30 @@ pub struct Sync {
     pub queue: Vec<VideoItem>,
     #[serde(default)]
     pub qpos: Option<usize>,
+    /// For "activity": "like", "dislike" or "share".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub action: String,
+    /// A "share" sent to every friend instead of one.
+    #[serde(default)]
+    pub general: bool,
+    /// Unix seconds, for ordering the feed.
+    #[serde(default)]
+    pub at: u64,
 }
 
 fn one() -> f64 {
     1.0
+}
+
+/// One friend's like, dislike or shared video.
+#[derive(Clone)]
+pub struct Activity {
+    pub from_id: String,
+    pub from_name: String,
+    pub action: String,
+    pub video: Option<VideoItem>,
+    pub general: bool,
+    pub at: u64,
 }
 
 struct Inner {
@@ -103,6 +123,8 @@ struct Inner {
     who: Instant,
     ready: bool,
     dirty: bool,
+    feed: Vec<Activity>,
+    unread: u32,
 }
 
 impl Inner {
@@ -131,6 +153,8 @@ impl Inner {
             who: Instant::now(),
             ready: false,
             dirty: false,
+            feed: Vec::new(),
+            unread: 0,
         }
     }
 }
@@ -166,6 +190,8 @@ pub struct Snapshot {
     pub room: Option<RoomInfo>,
     pub host: bool,
     pub invite: Option<Invite>,
+    pub feed: Vec<Activity>,
+    pub unread: u32,
 }
 
 pub fn snapshot(cx: &mut App) -> Snapshot {
@@ -179,6 +205,8 @@ pub fn snapshot(cx: &mut App) -> Snapshot {
         room: g.room.clone(),
         host: g.host,
         invite: g.invite.clone(),
+        feed: g.feed.clone(),
+        unread: g.unread,
     }
 }
 
@@ -360,6 +388,7 @@ pub fn join_room(cx: &mut App, room: String, host: String) {
                 speed: 1.0,
                 queue: Vec::new(),
                 qpos: None,
+                ..Default::default()
             };
             if let Ok(j) = serde_json::to_string(&msg) {
                 send_now(&g, &format!("TO {host} {j}"));
@@ -412,6 +441,7 @@ pub fn invite(cx: &mut App, friend_id: String) {
                 speed: 1.0,
                 queue: Vec::new(),
                 qpos: None,
+                ..Default::default()
             };
             if let Ok(j) = serde_json::to_string(&msg) {
                 send_now(&g, &format!("TO {friend_id} {j}"));
@@ -502,6 +532,150 @@ pub fn play_index(i: usize, cx: &mut App) {
             }
         });
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn send_to_friends(g: &Inner, msg: &Sync) -> bool {
+    let Ok(j) = serde_json::to_string(msg) else { return false };
+    let mut any = false;
+    for f in &g.cfg.friends {
+        if g.out.is_some() {
+            send_now(g, &format!("TO {} {j}", f.id));
+            any = true;
+        }
+    }
+    any
+}
+
+/// Shares a video with every saved friend (general activity).
+pub fn share_all(video: VideoItem, cx: &mut App) {
+    let sent = {
+        let r = cx.default_global::<Room>();
+        let g = r.inner.lock().unwrap();
+        let msg = Sync {
+            kind: "share".into(),
+            name: g.cfg.name.clone(),
+            video: Some(video),
+            general: true,
+            at: now_secs(),
+            speed: 1.0,
+            ..Default::default()
+        };
+        send_to_friends(&g, &msg)
+    };
+    if sent {
+        toast(cx, "Shared with friends");
+    } else {
+        toast(cx, "Connect to the relay and add a friend first");
+    }
+}
+
+/// Shares a video with one friend (shows up in their notifications).
+pub fn share_to(friend_id: String, video: VideoItem, cx: &mut App) {
+    let sent = {
+        let r = cx.default_global::<Room>();
+        let g = r.inner.lock().unwrap();
+        let msg = Sync {
+            kind: "share".into(),
+            name: g.cfg.name.clone(),
+            video: Some(video),
+            general: false,
+            at: now_secs(),
+            speed: 1.0,
+            ..Default::default()
+        };
+        match serde_json::to_string(&msg) {
+            Ok(j) if g.out.is_some() => {
+                send_now(&g, &format!("TO {friend_id} {j}"));
+                true
+            }
+            _ => false,
+        }
+    };
+    if sent {
+        toast(cx, "Video shared");
+    } else {
+        toast(cx, "Connect to the relay first");
+    }
+}
+
+/// Sends a like/dislike to friends when the matching sharing setting is on.
+pub fn activity(action: &str, video: VideoItem, cx: &mut App) {
+    let s = store::settings_snapshot();
+    let on = match action {
+        "like" => s.share_likes,
+        "dislike" => s.share_dislikes,
+        _ => false,
+    };
+    if !on {
+        return;
+    }
+    let r = cx.default_global::<Room>();
+    let g = r.inner.lock().unwrap();
+    let msg = Sync {
+        kind: "activity".into(),
+        name: g.cfg.name.clone(),
+        action: action.to_string(),
+        video: Some(video),
+        general: true,
+        at: now_secs(),
+        speed: 1.0,
+        ..Default::default()
+    };
+    send_to_friends(&g, &msg);
+}
+
+/// Unread direct shares, for the top-bar bell.
+pub fn unread(cx: &App) -> u32 {
+    cx.try_global::<Room>().map(|r| r.inner.lock().unwrap().unread).unwrap_or(0)
+}
+
+pub fn mark_read(cx: &mut App) {
+    let r = cx.default_global::<Room>();
+    r.inner.lock().unwrap().unread = 0;
+    cx.refresh_windows();
+}
+
+/// The video to share from the Social page: the room video if one is open,
+/// otherwise the active tab's video.
+pub fn current_video(cx: &App) -> Option<VideoItem> {
+    if let Some(pe) = crate::ui::app::room_player(cx) {
+        if let Some(v) = pe.read(cx).video.clone() {
+            return Some(v);
+        }
+    }
+    crate::player::controller::player(cx).read(cx).video.clone()
+}
+
+/// Menu items for the top-bar bell: the latest direct shares.
+pub fn notification_items(cx: &mut App) -> Vec<crate::ui::app::MenuItem> {
+    let feed: Vec<Activity> = {
+        let r = cx.default_global::<Room>();
+        let g = r.inner.lock().unwrap();
+        g.feed.iter().filter(|a| a.action == "share" && !a.general).rev().take(8).cloned().collect()
+    };
+    if feed.is_empty() {
+        return vec![crate::ui::app::MenuItem::new("bell", "No shared videos yet", |_, _| {})];
+    }
+    feed.into_iter()
+        .map(|a| {
+            let id = a.video.as_ref().map(|v| v.id.clone()).unwrap_or_default();
+            let title = a.video.as_ref().map(|v| if v.title.is_empty() { v.id.clone() } else { v.title.clone() }).unwrap_or_else(|| "a video".into());
+            let label = format!("{} shared: {}", a.from_name, title);
+            crate::ui::app::MenuItem::new("play", label, move |window, cx| {
+                if !id.is_empty() {
+                    crate::ui::app::navigate(
+                        crate::ui::app::Route::Watch { id: id.clone(), playlist: None, start: None },
+                        window,
+                        cx,
+                    );
+                }
+            })
+        })
+        .collect()
 }
 
 fn send_now(g: &Inner, line: &str) {
@@ -640,9 +814,9 @@ fn handle_event(cx: &mut App, ev: Event) {
             } else if let Some(rest) = line.strip_prefix("PONG") {
                 let _ = rest;
             } else if let Some(rest) = line.strip_prefix("FROM ").or_else(|| line.strip_prefix("ROOM ")) {
-                if let Some((_from, json)) = rest.split_once(' ') {
+                if let Some((from, json)) = rest.split_once(' ') {
                     if let Ok(msg) = serde_json::from_str::<Sync>(json) {
-                        on_message(cx, msg);
+                        on_message(cx, from, msg);
                         dirty_ui = true;
                     }
                 }
@@ -654,8 +828,55 @@ fn handle_event(cx: &mut App, ev: Event) {
     }
 }
 
-fn on_message(cx: &mut App, msg: Sync) {
+fn on_message(cx: &mut App, from: &str, msg: Sync) {
     match msg.kind.as_str() {
+        "share" => {
+            let name = if msg.name.trim().is_empty() { from.chars().take(8).collect::<String>() } else { msg.name.clone() };
+            let act = Activity {
+                from_id: from.to_string(),
+                from_name: name.clone(),
+                action: "share".into(),
+                video: msg.video.clone(),
+                general: msg.general,
+                at: msg.at,
+            };
+            let direct = !msg.general;
+            {
+                let r = cx.default_global::<Room>();
+                let mut g = r.inner.lock().unwrap();
+                g.feed.push(act);
+                if g.feed.len() > 100 {
+                    g.feed.remove(0);
+                }
+                if direct {
+                    g.unread = g.unread.saturating_add(1);
+                }
+            }
+            if direct {
+                toast(cx, format!("{name} shared a video with you"));
+            }
+            cx.refresh_windows();
+        }
+        "activity" => {
+            let name = if msg.name.trim().is_empty() { from.chars().take(8).collect::<String>() } else { msg.name.clone() };
+            let act = Activity {
+                from_id: from.to_string(),
+                from_name: name,
+                action: if msg.action.is_empty() { "activity".into() } else { msg.action.clone() },
+                video: msg.video.clone(),
+                general: msg.general,
+                at: msg.at,
+            };
+            {
+                let r = cx.default_global::<Room>();
+                let mut g = r.inner.lock().unwrap();
+                g.feed.push(act);
+                if g.feed.len() > 100 {
+                    g.feed.remove(0);
+                }
+            }
+            cx.refresh_windows();
+        }
         "invite" => {
             let inv = Invite { room: msg.room.clone(), host: msg.host.clone(), name: msg.name.clone() };
             let (room, host, who) = (inv.room.clone(), inv.host.clone(), inv.name.clone());
@@ -756,6 +977,7 @@ fn apply_sync(cx: &mut App, s: &Sync, from_guest: bool) {
                 speed: p.speed,
                 queue: p.queue.clone(),
                 qpos: p.queue_pos,
+                ..Default::default()
             }
         };
         let r = cx.default_global::<Room>();
@@ -842,6 +1064,7 @@ fn tick(cx: &mut App) {
         speed,
         queue,
         qpos,
+        ..Default::default()
     };
     // A plain heartbeat carries only position/state. Video and queue are sent
     // when they change, so the wire stays small even with a long queue.
@@ -859,6 +1082,7 @@ fn tick(cx: &mut App) {
             speed,
             queue: Vec::new(),
             qpos: None,
+            ..Default::default()
         }
     };
 

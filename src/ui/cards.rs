@@ -256,6 +256,10 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
             toast(cx, "Open a room first");
         }
     }));
+    let v_share = v.clone();
+    items.push(MenuItem::new("users", t("Share with friends"), move |_, cx| {
+        crate::room::share_all(v_share.clone(), cx);
+    }));
     let v2 = v.clone();
     items.push(MenuItem::new("clock", t("Save to Watch later"), move |_, cx| {
         if let Some(wl) = store::playlists().into_iter().find(|p| p.protected && p.name == "Watch later") {

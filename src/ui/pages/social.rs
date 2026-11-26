@@ -1,4 +1,4 @@
-//! Watch-party page: relay connection, friend list, room and invites.
+//! Social page: relay, friends, rooms, shared videos and friends' activity.
 use crate::room;
 use crate::ui::*;
 use gpui_kit::component::input::{Input, InputState};
@@ -9,6 +9,7 @@ pub struct SocialPage {
     name: Entity<InputState>,
     add_id: Entity<InputState>,
     add_name: Entity<InputState>,
+    show_codes: bool,
 }
 
 impl SocialPage {
@@ -31,7 +32,7 @@ impl SocialPage {
         });
         let add_id = cx.new(|cx| InputState::new(window, cx).placeholder("friend code"));
         let add_name = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
-        Self { relay, token, name, add_id, add_name }
+        Self { relay, token, name, add_id, add_name, show_codes: false }
     }
 }
 
@@ -85,6 +86,27 @@ fn dot(online: bool, p: Pal) -> Div {
         .bg(if online { Hsla::from(rgb(0x2ba640)) } else { p.text3 })
 }
 
+fn activity_row(a: &room::Activity, p: Pal, cx: &mut App) -> AnyElement {
+    let verb = match a.action.as_str() {
+        "like" => "liked",
+        "dislike" => "disliked",
+        "share" => "shared",
+        _ => "posted",
+    };
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded_lg()
+        .bg(p.chip)
+        .child(div().text_xs().text_color(p.text2).child(format!("{} {}", a.from_name, verb)));
+    if let Some(v) = &a.video {
+        col = col.child(crate::ui::cards::compact_row(v, false, None, cx));
+    }
+    col.into_any_element()
+}
+
 impl Render for SocialPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
@@ -136,27 +158,28 @@ impl Render for SocialPage {
                     .when_some(snap.error.clone(), |d, e| d.child(div().text_xs().text_color(rgb(0xff4e45)).child(e))),
             );
 
-        // my friend code
-        let code = snap.cfg.me.clone();
-        conn = conn.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .pt_2()
-                .child(div().text_xs().text_color(p.text2).child("Your friend code (share it so friends can add you)"))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().flex_1().min_w_0().text_xs().text_color(p.text).truncate().child(code.clone()))
-                        .child(button("room-copy", "Copy", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                            let code = room::snapshot(cx).cfg.me;
-                            crate::ui::copy_to_clipboard(code, cx);
-                        }))),
-                ),
-        );
+        // my friend code, hidden until asked for
+        let mut code_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .pt_2()
+            .child(button("social-code-toggle", if self.show_codes { "Hide friend code" } else { "Show friend code" }, p, false).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.show_codes = !this.show_codes;
+                    cx.notify();
+                }),
+            ));
+        if self.show_codes {
+            let code = snap.cfg.me.clone();
+            code_row = code_row
+                .child(div().flex_1().min_w_0().text_xs().text_color(p.text).truncate().child(code.clone()))
+                .child(button("room-copy", "Copy", p, false).on_click(cx.listener(|_, _, _w, cx| {
+                    let code = room::snapshot(cx).cfg.me;
+                    crate::ui::copy_to_clipboard(code, cx);
+                })));
+        }
+        conn = conn.child(code_row);
 
         // friends
         let mut friends = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Friends"));
@@ -179,10 +202,12 @@ impl Render for SocialPage {
         if snap.cfg.friends.is_empty() {
             friends = friends.child(div().text_sm().text_color(p.text3).child("Add a friend by their code."));
         }
+        let has_video = crate::room::current_video(cx).is_some();
         for f in snap.cfg.friends.clone() {
             let online = snap.online.iter().any(|x| x == &f.id);
             let can_invite = snap.host && snap.room.is_some() && online;
             let fid = f.id.clone();
+            let send_id = f.id.clone();
             let short: String = f.id.chars().take(12).collect();
             friends = friends.child(
                 div()
@@ -197,6 +222,16 @@ impl Render for SocialPage {
                         d.child(button(SharedString::from(format!("room-inv-{}", f.id)), "Invite", p, false).on_click(
                             cx.listener(move |_, _, _w, cx| {
                                 room::invite(cx, fid.clone());
+                                cx.notify();
+                            }),
+                        ))
+                    })
+                    .when(has_video, |d| {
+                        d.child(button(SharedString::from(format!("social-send-{}", f.id)), "Send", p, false).on_click(
+                            cx.listener(move |_, _, _w, cx| {
+                                if let Some(v) = crate::room::current_video(cx) {
+                                    room::share_to(send_id.clone(), v, cx);
+                                }
                                 cx.notify();
                             }),
                         ))
@@ -250,6 +285,32 @@ impl Render for SocialPage {
             );
         }
 
+        let direct: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.action == "share" && !a.general).take(12).cloned().collect();
+        let general: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.action != "share" || a.general).take(20).cloned().collect();
+
+        let mut shared = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Shared with you"));
+        if direct.is_empty() {
+            shared = shared.child(div().text_sm().text_color(p.text3).child("Nothing yet. Friends can send you a video from their Social page."));
+        } else {
+            for a in &direct {
+                shared = shared.child(activity_row(a, p, cx));
+            }
+        }
+
+        let mut acts = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Friends' activity"));
+        if general.is_empty() {
+            acts = acts.child(
+                div()
+                    .text_sm()
+                    .text_color(p.text3)
+                    .child("Likes, dislikes and videos friends share will show here. Friends choose what they share in Settings → Social."),
+            );
+        } else {
+            for a in &general {
+                acts = acts.child(activity_row(a, p, cx));
+            }
+        }
+
         div()
             .id("social-page")
             .size_full()
@@ -257,13 +318,21 @@ impl Render for SocialPage {
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_4()
-                    .p_6()
-                    .max_w(px(760.))
-                    .child(conn)
-                    .child(friends)
-                    .child(room_card),
+                    .justify_center()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .p_6()
+                            .w_full()
+                            .max_w(px(760.))
+                            .child(conn)
+                            .child(friends)
+                            .child(room_card)
+                            .child(shared)
+                            .child(acts),
+                    ),
             )
     }
 }

@@ -12,7 +12,11 @@
 
 ### Social
 
-- The **Watch party** page is now **Social** in the sidebar. It keeps friends, presence, invites and room creation.
+- The **Watch party** page is now **Social** in the sidebar. It keeps friends, presence, invites and room creation, and the layout is centered. Friend codes stay hidden until you press **Show friend code**.
+- **Settings → Social**: choose what friends can see — **Likes** and **Dislikes**. Everything is off by default; activity goes only to your saved friends through your relay.
+- The Social page shows **Shared with you** (videos a friend sent to you) and a **Friends' activity** feed of likes, dislikes and shared videos.
+- The top-bar **bell** shows videos friends shared with you; opening it marks them read. The icon shows a dot while something is unread.
+- **Share with friends** in any video's menu sends it to all friends. Each friend in Social has **Send**, which shares the video you are watching with that one friend.
 
 ### Tabs
 

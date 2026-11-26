@@ -2973,6 +2973,19 @@ impl AppView {
 
     // ───── chrome ─────
 
+    /// Bell: unread direct video shares from friends. Opening it marks them read.
+    fn render_notifications(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let unread = crate::room::unread(cx);
+        let icon_name = if unread > 0 { "bell-dot" } else { "bell" };
+        icon_button("bell", icon_name, cx)
+            .on_click(cx.listener(|_, ev: &ClickEvent, window, cx| {
+                crate::room::mark_read(cx);
+                let items = crate::room::notification_items(cx);
+                open_menu(ev.position(), items, window, cx);
+            }))
+            .into_any_element()
+    }
+
     fn render_topbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         localize_placeholder(&self.search, "Search or paste a YouTube link", window, cx);
         let p = pal(cx);
@@ -3129,6 +3142,7 @@ impl AppView {
                     .items_center()
                     .gap_1()
                     .children(preserve_btn)
+                    .child(self.render_notifications(cx))
                     .child(self.render_dl_button(cx))
                     .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.go(Route::Settings, window, cx))))
                     .child(self.account_button(cx))

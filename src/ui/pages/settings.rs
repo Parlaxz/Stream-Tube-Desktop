@@ -17,6 +17,7 @@ enum Section {
     Content,
     Subscriptions,
     Privacy,
+    Social,
     Network,
     Downloads,
     Data,
@@ -34,6 +35,7 @@ const SECTIONS: &[(Section, &str, &str)] = &[
     (Section::Content, "Content filters", "funnel"),
     (Section::Subscriptions, "Subscriptions", "tv"),
     (Section::Privacy, "Privacy", "lock"),
+    (Section::Social, "Social", "users"),
     (Section::Network, "Backend & network", "network"),
     (Section::Downloads, "Downloads", "download"),
     (Section::Data, "Import / export", "database"),
@@ -1253,6 +1255,16 @@ impl SettingsPage {
             .child(row("Group videos by day", "", switch("fgd", s.feed_group_by_day, |s, v| s.feed_group_by_day = v, cx), cx))
     }
 
+    fn social(&self, cx: &mut Context<Self>) -> Div {
+        let s = store::settings_snapshot();
+        let p = pal(cx);
+        card(cx)
+            .child(div().pt_2().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Share my activity with friends"))
+            .child(row("Likes", "Friends see the videos you like in their Social activity", switch("sh-like", s.share_likes, |s, v| s.share_likes = v, cx), cx))
+            .child(row("Dislikes", "Friends see the videos you dislike", switch("sh-dis", s.share_dislikes, |s, v| s.share_dislikes = v, cx), cx))
+            .child(div().text_xs().text_color(p.text2).child("Everything is off by default. Activity goes only to your saved friends through your relay; nothing is sent to a third party."))
+    }
+
     fn privacy(&self, cx: &mut Context<Self>) -> Div {
         let s = store::settings_snapshot();
         card(cx)
@@ -1551,6 +1563,7 @@ impl Render for SettingsPage {
             Section::Content => this.content(cx),
             Section::Subscriptions => this.subscriptions(cx),
             Section::Privacy => this.privacy(cx),
+            Section::Social => this.social(cx),
             Section::Network => this.network(cx),
             Section::Downloads => this.downloads(cx),
             Section::Data => this.data(cx),
@@ -1580,6 +1593,7 @@ impl Render for SettingsPage {
             Section::Content => self.content(cx),
             Section::Subscriptions => self.subscriptions(cx),
             Section::Privacy => self.privacy(cx),
+            Section::Social => self.social(cx),
             Section::Network => self.network(cx),
             Section::Downloads => self.downloads(cx),
             Section::Data => self.data(cx),

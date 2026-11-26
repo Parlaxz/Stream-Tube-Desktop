@@ -673,6 +673,8 @@ impl WatchPage {
         let v_save = video_item.clone();
         let v_more = video_item.clone();
         let v_room = video_item.clone();
+        let v_like = video_item.clone();
+        let v_dis = video_item.clone();
         let share_id = w.id.clone();
         let channel = w.channel.clone();
         div()
@@ -774,7 +776,14 @@ impl WatchPage {
                                                     .child(likes)
                                                     .on_click({
                                                         let id = w.id.clone();
-                                                        move |_, _, cx| set_rating(&id, if rating == 1 { 0 } else { 1 }, cx)
+                                                        let vid = v_like.clone();
+                                                        move |_, _, cx| {
+                                                            let next = if rating == 1 { 0 } else { 1 };
+                                                            set_rating(&id, next, cx);
+                                                            if next == 1 {
+                                                                crate::room::activity("like", vid.clone(), cx);
+                                                            }
+                                                        }
                                                     }),
                                             )
                                             .child(div().w(px(1.)).h_6().bg(p.border))
@@ -795,7 +804,14 @@ impl WatchPage {
                                                     .when_some(dislikes, |d, t| d.child(t))
                                                     .on_click({
                                                         let id = w.id.clone();
-                                                        move |_, _, cx| set_rating(&id, if rating == -1 { 0 } else { -1 }, cx)
+                                                        let vid = v_dis.clone();
+                                                        move |_, _, cx| {
+                                                            let next = if rating == -1 { 0 } else { -1 };
+                                                            set_rating(&id, next, cx);
+                                                            if next == -1 {
+                                                                crate::room::activity("dislike", vid.clone(), cx);
+                                                            }
+                                                        }
                                                     }),
                                             ),
                                     )

@@ -171,6 +171,9 @@ pub struct Settings {
     pub eq_preset: String,
     /// keep the tab bar visible even when only one tab is open
     pub always_show_tab_bar: bool,
+    // Social: what activity friends can see. All off by default.
+    pub share_likes: bool,
+    pub share_dislikes: bool,
 }
 
 impl Default for Settings {
@@ -300,6 +303,8 @@ impl Default for Settings {
             double_click_fullscreen: true,
             original_audio: true,
             hover_preview: true,
+            share_likes: false,
+            share_dislikes: false,
         }
     }
 }
