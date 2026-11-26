@@ -4234,8 +4234,14 @@ impl AppView {
             let cut: String = notes.chars().take(1400).collect();
             notes = cut.rsplit_once('\n').map(|(a, _)| a.to_string()).unwrap_or(cut) + "\n\n…";
         }
-        let has_installer = cfg!(windows) && rel.asset.is_some();
-        let size = rel.asset.as_ref().map(|a| a.size).filter(|s| *s > 0).map(|s| format!("{:.0} MB", s as f64 / 1_048_576.0));
+        let has_patch = cfg!(windows) && rel.patch.is_some();
+        let can_update = (cfg!(windows) && rel.asset.is_some()) || has_patch;
+        // prefer the small delta size when this build can use one
+        let size = if let Some(p) = rel.patch.as_ref().filter(|p| p.size > 0) {
+            Some(format!("{:.2} MB delta", p.size as f64 / 1_048_576.0))
+        } else {
+            rel.asset.as_ref().map(|a| a.size).filter(|s| *s > 0).map(|s| format!("{:.0} MB", s as f64 / 1_048_576.0))
+        };
         let version = rel.name.trim_start_matches("Stream Tube").trim().trim_start_matches('v').to_string();
         let accent = crate::ui::app_icon::icon_accent(store::settings_snapshot().accent);
         let [c0, _, c2] = crate::ui::app_icon::accent_stops(accent);
@@ -4394,10 +4400,10 @@ impl AppView {
                         .active(|s| s.opacity(0.8))
                         .text_color(white())
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(icon(if has_installer { "download" } else { "external-link" }).size_4().text_color(white()))
-                        .child(if has_installer { t("Update now") } else { t("Download") })
+                        .child(icon(if can_update { "download" } else { "external-link" }).size_4().text_color(white()))
+                        .child(if can_update { t("Update now") } else { t("Download") })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !has_installer {
+                            if !can_update {
                                 this.dialog = None;
                             }
                             crate::updater::install(cx);

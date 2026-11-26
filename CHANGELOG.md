@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.5
+
+### Updates
+
+- The update dialog shows the **delta size** when a patch is available (for example “2.83 MB delta”) instead of the full installer size.
+- Each release now publishes patches from **every cached older version**, so updating from a version you skipped still uses a small patch when possible.
+
 ## 0.11.4
 
 ### Tabs

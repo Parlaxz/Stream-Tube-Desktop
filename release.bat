@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
 rem Usage: release.bat 0.8.1  (or double-click it and type the version)
@@ -31,16 +31,6 @@ if not errorlevel 1 (
   echo Tag v%V% already exists.
   goto :fail
 )
-
-rem Previous release = base for the delta patch. Its exe is cached in dist\exe.
-rem (a for /f would swallow the "=" in --abbrev=0)
-set "PREV_TAG="
-git describe --tags --abbrev=0 > "%TEMP%\streamtube_prev_tag.txt" 2>nul
-if exist "%TEMP%\streamtube_prev_tag.txt" set /p PREV_TAG=<"%TEMP%\streamtube_prev_tag.txt"
-del "%TEMP%\streamtube_prev_tag.txt" >nul 2>nul
-set "PREV="
-if defined PREV_TAG set "PREV=%PREV_TAG%"
-if /i "%PREV_TAG:~0,1%"=="v" set "PREV=%PREV_TAG:~1%"
 
 set "CARGO=cargo"
 where cargo >nul 2>nul || set "CARGO=%USERPROFILE%\.cargo\bin\cargo.exe"
@@ -75,17 +65,22 @@ echo Building release...
 echo Building installer...
 "%ISCC%" /Q "/DAppVersion=%V%" "installer\streamtube.iss" || (git checkout -- Cargo.toml Cargo.lock & goto :fail)
 
-rem Delta patch: previous exe -> new exe (bidiff). Missing base just skips it.
-set "PATCH="
-if defined PREV if exist "dist\exe\streamtube-%PREV%.exe" (
-  echo Building delta patch %PREV% -^> %V%...
+rem Delta patches: every cached older exe -> new exe (bidiff). Anyone who
+rem skipped releases still gets a small patch when an older exe is cached.
+set "PATCHES="
+if exist "dist\exe\streamtube-*.exe" (
+  echo Building delta patches...
   "%CARGO%" build --release --bin patchgen --features patchgen
   if not errorlevel 1 (
-    target\release\patchgen.exe diff "dist\exe\streamtube-%PREV%.exe" "target\release\streamtube.exe" "dist\streamtube-%PREV%-to-%V%.patch"
-    if not errorlevel 1 set "PATCH=dist\streamtube-%PREV%-to-%V%.patch"
+    for %%f in ("dist\exe\streamtube-*.exe") do (
+      if /i not "%%~nf"=="streamtube-%V%" (
+        target\release\patchgen.exe diff "%%~f" "target\release\streamtube.exe" "dist\%%~nf-to-%V%.patch"
+        if not errorlevel 1 set "PATCHES=!PATCHES! dist\%%~nf-to-%V%.patch"
+      )
+    )
   )
 )
-if defined PATCH echo Delta patch: %PATCH%
+if defined PATCHES echo Delta patches:%PATCHES%
 if not exist "dist\exe" mkdir "dist\exe"
 copy /Y "target\release\streamtube.exe" "dist\exe\streamtube-%V%.exe" >nul
 
@@ -106,7 +101,7 @@ powershell -NoProfile -Command "$v=$env:ST_VERSION; $t=[IO.File]::ReadAllText('C
 if not errorlevel 1 set "NOTES=--notes-file dist\release-notes.md"
 
 set "EXTRA="
-if defined PATCH set "EXTRA=%PATCH%"
+if defined PATCHES set "EXTRA=!PATCHES!"
 gh release create "v%V%" "dist\StreamTube-%V%-setup.exe" %EXTRA% --repo %REPO% --verify-tag --title "Stream Tube %V%" %NOTES% %LATEST% %PRE% || goto :fail
 
 echo Done: https://github.com/%REPO%/releases/tag/v%V%
