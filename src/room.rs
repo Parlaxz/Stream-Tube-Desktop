@@ -328,6 +328,7 @@ pub fn create_room(cx: &mut App) {
         toast(cx, "Connect to the relay first");
         return;
     }
+    crate::ui::app::open_room(cx);
     toast(cx, "Room created. Invite a friend.");
     cx.refresh_windows();
 }
@@ -370,6 +371,7 @@ pub fn join_room(cx: &mut App, room: String, host: String) {
         toast(cx, "Connect to the relay first");
         return;
     }
+    crate::ui::app::open_room(cx);
     toast(cx, "Joining room");
     cx.refresh_windows();
 }
@@ -440,6 +442,66 @@ pub fn decline_invite(cx: &mut App) {
     let r = cx.default_global::<Room>();
     r.inner.lock().unwrap().invite = None;
     cx.refresh_windows();
+}
+
+/// True while a room tab is open (the shared queue and player exist).
+pub fn in_room(cx: &App) -> bool {
+    crate::ui::app::room_player(cx).is_some()
+}
+
+/// Adds a video to the room queue. The first video starts the room playback.
+pub fn enqueue(v: VideoItem, cx: &mut App) {
+    let Some(pe) = crate::ui::app::room_player(cx) else {
+        toast(cx, "Open a room first");
+        return;
+    };
+    pe.update(cx, |p, cx| {
+        if p.video.is_none() {
+            p.queue = vec![v.clone()];
+            p.queue_pos = Some(0);
+            p.play(v, None, cx);
+        } else {
+            if p.queue.is_empty() {
+                if let Some(cur) = p.video.clone() {
+                    p.queue.push(cur);
+                    p.queue_pos = Some(0);
+                }
+            }
+            p.queue.push(v);
+        }
+        cx.notify();
+    });
+}
+
+/// Adds a video to the room queue and plays it right away.
+pub fn play_now(v: VideoItem, cx: &mut App) {
+    let Some(pe) = crate::ui::app::room_player(cx) else {
+        toast(cx, "Open a room first");
+        return;
+    };
+    pe.update(cx, |p, cx| {
+        if let Some(pos) = p.queue.iter().position(|x| x.id == v.id) {
+            p.queue_pos = Some(pos);
+        } else {
+            p.queue.push(v.clone());
+            p.queue_pos = Some(p.queue.len() - 1);
+        }
+        p.play(v, None, cx);
+        cx.notify();
+    });
+}
+
+/// Plays a row of the room queue in the room player.
+pub fn play_index(i: usize, cx: &mut App) {
+    if let Some(pe) = crate::ui::app::room_player(cx) {
+        pe.update(cx, |p, cx| {
+            if let Some(v) = p.queue.get(i).cloned() {
+                p.queue_pos = Some(i);
+                p.play(v, None, cx);
+                cx.notify();
+            }
+        });
+    }
 }
 
 fn send_now(g: &Inner, line: &str) {
@@ -645,32 +707,19 @@ fn on_message(cx: &mut App, msg: Sync) {
 
 // ── player sync ────────────────────────────────────────────────────────────
 
-fn open_watch(cx: &mut App, id: &str, pos: f64) {
-    let pip = crate::ui::pip::handle(cx);
-    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
-    let route = crate::ui::app::Route::Watch {
-        id: id.to_string(),
-        playlist: None,
-        start: (pos > 1.0).then_some(pos),
-    };
-    let _ = win.update(cx, |_, window, cx| crate::ui::app::navigate(route, window, cx));
-}
-
-/// Applies a remote state (guest) or intent (host). `from_guest` means the host
-/// is applying a guest's intent, so the result must be broadcast again.
+/// Applies a remote state (guest) or intent (host) to the room tab's player.
+/// `from_guest` means the host is applying a guest's intent, so the result must
+/// be broadcast again.
 fn apply_sync(cx: &mut App, s: &Sync, from_guest: bool) {
-    let pe = controller::player(cx);
+    let Some(pe) = crate::ui::app::room_player(cx) else { return };
     let current = pe.read(cx).video.as_ref().map(|v| v.id.clone());
-    let mut video_changed = false;
-    if let Some(v) = &s.video {
-        if current.as_deref() != Some(v.id.as_str()) {
-            open_watch(cx, &v.id, s.pos);
-            video_changed = true;
-        }
-    }
-    let pe = controller::player(cx);
-    let loading = pe.read(cx).loading;
+    let video_changed = s.video.as_ref().is_some_and(|v| current.as_deref() != Some(v.id.as_str()));
     pe.update(cx, |p, cx| {
+        if let Some(v) = &s.video {
+            if p.video.as_ref().map(|x| x.id.as_str()) != Some(v.id.as_str()) {
+                p.play(v.clone(), Some(s.pos), cx);
+            }
+        }
         if p.paused != s.paused {
             p.set_paused(s.paused, cx);
         }
@@ -681,7 +730,7 @@ fn apply_sync(cx: &mut App, s: &Sync, from_guest: bool) {
             p.queue = s.queue.clone();
             p.queue_pos = s.qpos;
         }
-        if !video_changed && !loading && (p.time - s.pos).abs() > 1.0 {
+        if !video_changed && !p.loading && (p.time - s.pos).abs() > 1.0 {
             p.seek_to(s.pos);
         }
     });
@@ -695,7 +744,6 @@ fn apply_sync(cx: &mut App, s: &Sync, from_guest: bool) {
         // Remember what the player really has, not the (possibly partial)
         // heartbeat, so omitted fields are not mistaken for a change.
         let actual = {
-            let pe = controller::player(cx);
             let p = pe.read(cx);
             Sync {
                 kind: "intent".into(),
@@ -745,7 +793,7 @@ fn tick(cx: &mut App) {
         return;
     }
 
-    let pe = controller::player(cx);
+    let Some(pe) = crate::ui::app::room_player(cx) else { return };
     let (video, paused, time, speed, queue, qpos, loading) = {
         let p = pe.read(cx);
         (p.video.clone(), p.paused, p.time, p.speed, p.queue.clone(), p.queue_pos, p.loading)

@@ -28,6 +28,7 @@ pub enum Route {
     Watch { id: String, playlist: Option<String>, start: Option<f64> },
     Settings,
     Downloads,
+    Social,
     Room,
 }
 
@@ -46,7 +47,8 @@ impl Route {
             Route::Watch { .. } => "Watch".into(),
             Route::Settings => "Settings".into(),
             Route::Downloads => "Downloads".into(),
-            Route::Room => "Watch party".into(),
+            Route::Social => "Social".into(),
+            Route::Room => "Room".into(),
         }
     }
 }
@@ -336,6 +338,44 @@ pub fn sync_watch_route(id: String, cx: &mut App) {
             }
         });
     }
+}
+
+/// The player owned by the room tab, if one is open. Room sync targets only
+/// this player, so videos played in other tabs are never shared.
+pub fn room_player(cx: &App) -> Option<Entity<Player>> {
+    let app = cx.try_global::<AppHandle>()?.0.upgrade()?;
+    let a = app.read(cx);
+    a.tabs.iter().enumerate().find_map(|(i, tab)| {
+        let route = if i == a.active_tab { &a.route } else { &tab.route };
+        matches!(route, Route::Room).then(|| tab.player.clone())
+    })
+}
+
+/// Shows the room tab, opening one if needed. The room lives in its own tab so
+/// browsing never replaces it.
+pub fn open_room(cx: &mut App) {
+    let pip = crate::ui::pip::handle(cx);
+    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
+    let _ = win.update(cx, |_, window, cx| {
+        let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
+        app.update(cx, |a, cx| {
+            if matches!(&a.route, Route::Room) {
+                return;
+            }
+            if let Some(i) = a.tabs.iter().position(|t| matches!(&t.route, Route::Room)) {
+                a.switch_tab(i, window, cx);
+            } else {
+                a.new_tab(Route::Room, None, None, true, window, cx);
+            }
+        });
+    });
+}
+
+/// Opens the Social page (friends, rooms, activity).
+pub fn open_social(cx: &mut App) {
+    let pip = crate::ui::pip::handle(cx);
+    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
+    let _ = win.update(cx, |_, window, cx| navigate(Route::Social, window, cx));
 }
 
 pub fn is_current_page(page: EntityId, cx: &App) -> bool {
@@ -1446,6 +1486,12 @@ impl AppView {
             Route::Channel(id) | Route::Playlist(id) | Route::Watch { id, .. } if id.is_empty() => return,
             _ => {}
         }
+        // A room tab is a live session: links from it open in a new tab instead
+        // of replacing the room and ending the party.
+        if matches!(&self.route, Route::Room) && route != Route::Room {
+            self.new_tab(route, None, None, true, window, cx);
+            return;
+        }
         // Home is the pinned first tab: going Home from another tab shows it
         if route == Route::Home && self.active_tab != 0 {
             self.switch_tab(0, window, cx);
@@ -1554,9 +1600,12 @@ impl AppView {
         crate::player::preview::stop(cx);
         crate::ui::image_cache::on_navigate(cx);
         self.drawer_open = false;
-        // pause the player of the tab we are leaving; its engine and cache stay alive
-        let old_player = self.tabs[self.active_tab].player.clone();
-        old_player.update(cx, |p, cx| p.park(cx));
+        // pause the player of the tab we are leaving; its engine and cache stay alive.
+        // The room tab keeps playing while you browse, so the party does not stop.
+        if !matches!(&self.route, Route::Room) {
+            let old_player = self.tabs[self.active_tab].player.clone();
+            old_player.update(cx, |p, cx| p.park(cx));
+        }
         // park the shown tab
         let cur = &mut self.tabs[self.active_tab];
         cur.route = self.route.clone();
@@ -1608,6 +1657,12 @@ impl AppView {
         // the pinned Home tab cannot close
         if index == 0 || index >= self.tabs.len() {
             return;
+        }
+        // closing the room tab leaves the room
+        let closing_room = matches!(&self.tabs[index].route, Route::Room)
+            || (index == self.active_tab && matches!(&self.route, Route::Room));
+        if closing_room {
+            crate::room::leave_room(cx);
         }
         if index == self.active_tab {
             // show the neighbour first, then drop this one
@@ -1696,7 +1751,8 @@ impl AppView {
             Route::Watch { .. } => "play",
             Route::Settings => "settings",
             Route::Downloads => "download",
-            Route::Room => "users",
+            Route::Social => "users",
+            Route::Room => "radio",
         }
     }
 
@@ -3123,7 +3179,7 @@ impl AppView {
                 .child(rail("r-home", "house", "Home", Route::Home, route == Route::Home, cx))
                 .when(!s.hide_shorts, |d| d.child(rail("r-shorts", "zap", "Shorts", Route::Shorts(None), matches!(route, Route::Shorts(_)), cx)))
                 .child(rail("r-subs", "tv", "Subscriptions", Route::Subscriptions(None), matches!(route, Route::Subscriptions(_)), cx))
-                .child(rail("r-room", "users", "Party", Route::Room, route == Route::Room, cx))
+                .child(rail("r-social", "users", "Social", Route::Social, route == Route::Social, cx))
                 .child(rail("r-you", "circle-user", "You", Route::Library, route == Route::Library, cx))
                 .child(rail("r-dl", "download", "Downloads", Route::Downloads, route == Route::Downloads, cx))
                 .into_any_element();
@@ -3189,7 +3245,7 @@ impl AppView {
             .child(entry("s-home", "house", "Home", Route::Home, route == Route::Home, cx))
             .when(!s.hide_shorts, |d| d.child(entry("s-shorts", "zap", "Shorts", Route::Shorts(None), matches!(route, Route::Shorts(_)), cx)))
             .child(entry("s-subs", "tv", "Subscriptions", Route::Subscriptions(None), matches!(route, Route::Subscriptions(_)), cx))
-            .child(entry("s-room", "users", "Watch party", Route::Room, route == Route::Room, cx))
+            .child(entry("s-social", "users", "Social", Route::Social, route == Route::Social, cx))
             .child(sep())
             .child(nav_item(
                 heading("You").id("s-you").cursor_pointer().rounded_lg().h(px(38.)).hover(move |s| s.bg(p.hover)).child(icon("chevron-right").size_4().text_color(p.text)),
@@ -4439,6 +4495,7 @@ fn build_page(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
         }
         Route::Settings => cx.new(|cx| settings::SettingsPage::new(window, cx)).into(),
         Route::Downloads => cx.new(|cx| downloads::DownloadsPage::new(window, cx)).into(),
+        Route::Social => cx.new(|cx| social::SocialPage::new(window, cx)).into(),
         Route::Room => cx.new(|cx| room::RoomPage::new(window, cx)).into(),
     }
 }

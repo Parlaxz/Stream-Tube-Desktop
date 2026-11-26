@@ -2,6 +2,18 @@
 
 ## 0.11.0
 
+### Watch party
+
+- Rooms open in their **own tab** with their own player and queue. Videos you play in other tabs are no longer shared; only the room tab is synced.
+- **Room queue**: add videos by pasting a link (**Add to queue** or **Play now**), click a queue row to play it, or remove a row from its menu.
+- **Add to room** on any thumbnail (hover) and on the watch page beside Like/Share, while a room is open. The video menu also has **Add to room queue** and **Play in room**.
+- Everyone in the room can pause, seek, change speed, pick the video and edit the queue; the host relays and keeps one clock.
+- Invites arrive as a toast and open the room tab.
+
+### Social
+
+- The **Watch party** page is now **Social** in the sidebar. It keeps friends, presence, invites and room creation.
+
 ### Tabs
 
 - Close a tab from the tab overview with its **X** button or a middle-click on the card. The pinned Home tab stays open.

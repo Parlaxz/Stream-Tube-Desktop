@@ -672,6 +672,7 @@ impl WatchPage {
         let v_dl = video_item.clone();
         let v_save = video_item.clone();
         let v_more = video_item.clone();
+        let v_room = video_item.clone();
         let share_id = w.id.clone();
         let channel = w.channel.clone();
         div()
@@ -805,6 +806,11 @@ impl WatchPage {
                             .child(pill("w-share", Some("share-2"), "Share", cx).on_click(move |_, _, cx| {
                                 copy_to_clipboard(format!("https://youtu.be/{share_id}"), cx)
                             }))
+                            .when(crate::room::in_room(cx), |d| {
+                                d.child(pill("w-room", Some("users"), "Add to room", cx).on_click(move |_, _, cx| {
+                                    crate::room::enqueue(v_room.clone(), cx);
+                                }))
+                            })
                             .child(pill("w-dl", Some("download"), "Download", cx).on_click(move |ev, window, cx| {
                                 open_menu(ev.position(), download_menu_items(&v_dl, ev.position()), window, cx);
                             }))

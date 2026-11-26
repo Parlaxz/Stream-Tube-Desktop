@@ -5,6 +5,7 @@ pub mod library;
 pub mod playlist;
 pub mod room;
 pub mod search;
+pub mod social;
 pub mod settings;
 pub mod shorts;
 pub mod subscriptions;

@@ -122,6 +122,7 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
     let group = SharedString::from(format!("thumb-{}", v.id));
     let save = v.clone();
     let queue = v.clone();
+    let room = v.clone();
     let chooser = v.clone();
     div()
         .id(SharedString::from(format!("th-{}", v.id)))
@@ -190,7 +191,17 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
                             crate::player::controller::enqueue(queue.clone(), cx);
                             toast(cx, "Added to queue");
                         }),
-                ),
+                )
+                .when(crate::room::in_room(cx), |d| {
+                    d.child(
+                        icon_square(SharedString::from(format!("ar-{}", v.id)), "users")
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                crate::room::enqueue(room.clone(), cx);
+                            }),
+                    )
+                }),
         )
 }
 
@@ -228,6 +239,22 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     items.push(MenuItem::new("list-plus", t("Add to queue"), move |_, cx| {
         crate::player::controller::enqueue(v1.clone(), cx);
         toast(cx, t("Added to queue"));
+    }));
+    let v_room = v.clone();
+    items.push(MenuItem::new("users", t("Add to room queue"), move |_, cx| {
+        if crate::room::in_room(cx) {
+            crate::room::enqueue(v_room.clone(), cx);
+        } else {
+            toast(cx, "Open a room first");
+        }
+    }));
+    let v_room_now = v.clone();
+    items.push(MenuItem::new("radio", t("Play in room"), move |_, cx| {
+        if crate::room::in_room(cx) {
+            crate::room::play_now(v_room_now.clone(), cx);
+        } else {
+            toast(cx, "Open a room first");
+        }
     }));
     let v2 = v.clone();
     items.push(MenuItem::new("clock", t("Save to Watch later"), move |_, cx| {
