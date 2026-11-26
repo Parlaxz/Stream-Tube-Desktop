@@ -801,4 +801,30 @@ mod live_proxy_tests {
             assert_eq!(get(&bare).0, 403);
         }
     }
+
+    /// End to end: mpv decodes real video frames through the local proxy.
+    #[test]
+    #[ignore = "network"]
+    fn plays_a_real_video_through_the_proxy() {
+        use std::time::{Duration, Instant};
+
+        let info = crate::api::streams::get_streams("dQw4w9WgXcQ").unwrap();
+        let hls = info.hls_url.as_ref().expect("HLS url");
+        let url = super::local_hls(hls, 720, 0, None);
+        let mpv = super::super::mpv::Mpv::new(&[("ao", "null"), ("mute", "yes")], |_| {}).expect("libmpv");
+        mpv.command(&["loadfile", &url, "replace"]).expect("loadfile");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let time = mpv.get_f64("time-pos").unwrap_or(0.0);
+            let width = mpv.get_f64("width").unwrap_or(0.0);
+            eprintln!("playback: {time:.1}s, video width {width}");
+            if time > 1.5 && width >= 320.0 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no decoded video within 30s (time {time}, width {width})");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let _ = mpv.command(&["quit"]);
+    }
 }
