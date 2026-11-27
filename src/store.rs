@@ -165,6 +165,14 @@ pub struct Settings {
     pub always_scrollbars: bool,
     /// show the video title in the upper-left corner of the player when controls are visible
     pub show_player_title: bool,
+    // Which player control-bar buttons are shown. All on by default.
+    pub show_captions_button: bool,
+    pub show_screenshot_button: bool,
+    pub show_pip_buttons: bool,
+    pub show_speed_buttons: bool,
+    pub show_theater_button: bool,
+    pub show_windowed_fullscreen_button: bool,
+    pub show_fullscreen_button: bool,
     /// group subscriptions feed videos into day buckets (Today, Yesterday, ...)
     pub feed_group_by_day: bool,
     /// audio equalizer preset ("flat", "bass", "voice", "treble", "warm")
@@ -290,6 +298,13 @@ impl Default for Settings {
             shorts_autoadvance: false,
             feed_group_by_day: true,
             show_player_title: false,
+            show_captions_button: true,
+            show_screenshot_button: true,
+            show_pip_buttons: true,
+            show_speed_buttons: true,
+            show_theater_button: true,
+            show_windowed_fullscreen_button: true,
+            show_fullscreen_button: true,
             eq_preset: "flat".into(),
             always_show_tab_bar: false,
             shorts_preload: 1,

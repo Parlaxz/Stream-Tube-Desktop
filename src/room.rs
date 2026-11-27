@@ -78,6 +78,9 @@ pub struct Sync {
     pub queue: Vec<VideoItem>,
     #[serde(default)]
     pub qpos: Option<usize>,
+    /// Names currently in the room, from the host.
+    #[serde(default)]
+    pub members: Vec<String>,
     /// A state message carries the whole queue (even an empty one). Heartbeats
     /// leave it false and omit the queue to stay small.
     #[serde(default)]
@@ -117,6 +120,22 @@ pub struct RoomAd {
     pub at: u64,
 }
 
+/// A guest the host has heard from recently.
+#[derive(Clone)]
+struct Member {
+    name: String,
+    seen: Instant,
+}
+
+/// One emoji/GIF reaction, kept briefly so the overlay can animate it.
+#[derive(Clone)]
+pub struct Reaction {
+    pub seq: u64,
+    pub from: String,
+    pub action: String,
+    pub at: Instant,
+}
+
 struct Inner {
     cfg: Config,
     status: Status,
@@ -142,6 +161,12 @@ struct Inner {
     unread: u32,
     rooms: Vec<RoomAd>,
     rooms_beat: Instant,
+    /// Guests heard from recently (host) or the last roster (guest).
+    members: Vec<Member>,
+    /// Last "still here" ping a guest sent the host.
+    here: Instant,
+    reactions: Vec<Reaction>,
+    next_reaction: u64,
 }
 
 impl Inner {
@@ -175,6 +200,10 @@ impl Inner {
             unread: 0,
             rooms: Vec::new(),
             rooms_beat: Instant::now(),
+            members: Vec::new(),
+            here: Instant::now(),
+            reactions: Vec::new(),
+            next_reaction: 0,
         }
     }
 }
@@ -213,6 +242,10 @@ pub struct Snapshot {
     pub feed: Vec<Activity>,
     pub unread: u32,
     pub rooms: Vec<RoomAd>,
+    pub members: Vec<String>,
+    /// Who hosts (a name, not an id).
+    pub host_name: String,
+    pub reactions: Vec<Reaction>,
 }
 
 pub fn snapshot(cx: &mut App) -> Snapshot {
@@ -231,7 +264,56 @@ pub fn snapshot(cx: &mut App) -> Snapshot {
         feed: g.feed.clone(),
         unread: g.unread,
         rooms: g.rooms.clone(),
+        members: roster(&g),
+        host_name: host_name(&g),
+        reactions: g.reactions.clone(),
     }
+}
+
+/// The host's display name: our own name while hosting, otherwise the saved
+/// friend's name for the room's host id.
+fn host_name(g: &Inner) -> String {
+    if g.host {
+        return g.cfg.name.clone();
+    }
+    g.room
+        .as_ref()
+        .and_then(|r| g.cfg.friends.iter().find(|f| f.id == r.host).map(|f| f.name.clone()))
+        .unwrap_or_else(|| "Host".into())
+}
+
+/// The people in the room: you first, then the guests we heard from.
+fn roster(g: &Inner) -> Vec<String> {
+    let mut names = vec![g.cfg.name.clone()];
+    for m in &g.members {
+        if !names.iter().any(|n| n == &m.name) {
+            names.push(m.name.clone());
+        }
+    }
+    names
+}
+
+/// Records a guest and returns true when it is a new name.
+fn remember(g: &mut Inner, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    if let Some(m) = g.members.iter_mut().find(|m| m.name == name) {
+        m.seen = Instant::now();
+        false
+    } else {
+        g.members.push(Member { name: name.to_string(), seen: Instant::now() });
+        if g.members.len() > 32 {
+            g.members.remove(0);
+        }
+        true
+    }
+}
+
+fn forget(g: &mut Inner, name: &str) {
+    let name = name.trim();
+    g.members.retain(|m| m.name != name);
 }
 
 enum Event {
@@ -311,10 +393,10 @@ pub fn connect(cx: &mut App) {
     std::thread::spawn(move || net_loop(relay, token, me, name, conn_gen, tx));
 }
 
-pub fn disconnect(cx: &mut App) {
+pub fn disconnect(window: &mut Window, cx: &mut App) {
     // Closing the relay also ends the party: close the room tab (which leaves
     // the room) so no empty room tab is left behind.
-    crate::ui::app::close_room(cx);
+    crate::ui::app::close_room(window, cx);
     let ctl = {
         let r = cx.default_global::<Room>();
         let mut g = r.inner.lock().unwrap();
@@ -368,7 +450,7 @@ pub fn remove_friend(id: String, cx: &mut App) {
     cx.refresh_windows();
 }
 
-pub fn create_room(cx: &mut App) {
+pub fn create_room(window: &mut Window, cx: &mut App) {
     let ok = {
         let r = cx.default_global::<Room>();
         let mut g = r.inner.lock().unwrap();
@@ -382,6 +464,7 @@ pub fn create_room(cx: &mut App) {
             g.status = Status::InRoom;
             g.ready = true;
             g.last_sent = None;
+            g.members.clear();
             g.dirty = true;
             send_now(&g, &format!("JOIN {id}"));
             let msg = Sync {
@@ -403,12 +486,12 @@ pub fn create_room(cx: &mut App) {
         toast(cx, "Connect to the relay first");
         return;
     }
-    crate::ui::app::open_room(cx);
+    crate::ui::app::open_room(window, cx);
     toast(cx, "Room created. Invite a friend.");
     cx.refresh_windows();
 }
 
-pub fn join_room(cx: &mut App, room: String, host: String) {
+pub fn join_room(window: &mut Window, cx: &mut App, room: String, host: String) {
     let ok = {
         let r = cx.default_global::<Room>();
         let mut g = r.inner.lock().unwrap();
@@ -420,6 +503,7 @@ pub fn join_room(cx: &mut App, room: String, host: String) {
             g.status = Status::InRoom;
             g.ready = false;
             g.last_sent = None;
+            g.members.clear();
             g.dirty = false;
             g.invite = None;
             send_now(&g, &format!("JOIN {room}"));
@@ -447,7 +531,7 @@ pub fn join_room(cx: &mut App, room: String, host: String) {
         toast(cx, "Connect to the relay first");
         return;
     }
-    crate::ui::app::open_room(cx);
+    crate::ui::app::open_room(window, cx);
     toast(cx, "Joining room");
     cx.refresh_windows();
 }
@@ -470,6 +554,18 @@ pub fn leave_room(cx: &mut App) {
                 };
                 send_to_friends(&g, &msg);
             }
+        } else if let Some(info) = &g.room {
+            // Tell the host so the roster drops us right away.
+            let leave = Sync {
+                kind: "leave".into(),
+                room: info.id.clone(),
+                host: info.host.clone(),
+                name: g.cfg.name.clone(),
+                ..Default::default()
+            };
+            if let Ok(j) = serde_json::to_string(&leave) {
+                send_now(&g, &format!("TO {} {j}", info.host));
+            }
         }
         if let Some(info) = g.room.take() {
             send_now(&g, &format!("LEAVE {}", info.id));
@@ -477,6 +573,7 @@ pub fn leave_room(cx: &mut App) {
         g.host = false;
         g.ready = false;
         g.last_sent = None;
+        g.members.clear();
         g.status = if g.out.is_some() { Status::Online } else { Status::Offline };
     }
     cx.refresh_windows();
@@ -519,14 +616,14 @@ pub fn invite(cx: &mut App, friend_id: String) {
     }
 }
 
-pub fn accept_invite(cx: &mut App) {
+pub fn accept_invite(window: &mut Window, cx: &mut App) {
     let inv = {
         let r = cx.default_global::<Room>();
         let g = r.inner.lock().unwrap();
         g.invite.clone()
     };
     if let Some(inv) = inv {
-        join_room(cx, inv.room, inv.host);
+        join_room(window, cx, inv.room, inv.host);
     }
 }
 
@@ -596,6 +693,35 @@ pub fn play_index(i: usize, cx: &mut App) {
     }
 }
 
+/// The new index of the playing row after moving `from` to `to`.
+fn moved_pos(cur: usize, from: usize, to: usize) -> usize {
+    if cur == from {
+        to
+    } else if from < cur && to >= cur {
+        cur - 1
+    } else if from > cur && to <= cur {
+        cur + 1
+    } else {
+        cur
+    }
+}
+
+/// Moves a queue row to another position, keeping the current row current.
+pub fn move_queue(from: usize, to: usize, cx: &mut App) {
+    let Some(pe) = crate::ui::app::room_player(cx) else { return };
+    pe.update(cx, |p, cx| {
+        if from == to || from >= p.queue.len() || to >= p.queue.len() {
+            return;
+        }
+        let item = p.queue.remove(from);
+        p.queue.insert(to, item);
+        if let Some(cur) = p.queue_pos {
+            p.queue_pos = Some(moved_pos(cur, from, to));
+        }
+        cx.notify();
+    });
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -612,21 +738,40 @@ fn send_to_friends(g: &Inner, msg: &Sync) -> bool {
     any
 }
 
+/// Records what this install shared or rated, for the Social "Your activity" card.
+fn record_own(g: &mut Inner, action: &str, video: Option<VideoItem>, general: bool) {
+    g.feed.push(Activity {
+        from_id: g.cfg.me.clone(),
+        from_name: "You".into(),
+        action: action.to_string(),
+        video,
+        general,
+        at: now_secs(),
+    });
+    if g.feed.len() > 100 {
+        g.feed.remove(0);
+    }
+}
+
 /// Shares a video with every saved friend (general activity).
 pub fn share_all(video: VideoItem, cx: &mut App) {
     let sent = {
         let r = cx.default_global::<Room>();
-        let g = r.inner.lock().unwrap();
+        let mut g = r.inner.lock().unwrap();
         let msg = Sync {
             kind: "share".into(),
             name: g.cfg.name.clone(),
-            video: Some(video),
+            video: Some(video.clone()),
             general: true,
             at: now_secs(),
             speed: 1.0,
             ..Default::default()
         };
-        send_to_friends(&g, &msg)
+        let sent = send_to_friends(&g, &msg);
+        if sent {
+            record_own(&mut g, "share", Some(video), true);
+        }
+        sent
     };
     if sent {
         toast(cx, "Shared with friends");
@@ -639,23 +784,27 @@ pub fn share_all(video: VideoItem, cx: &mut App) {
 pub fn share_to(friend_id: String, video: VideoItem, cx: &mut App) {
     let sent = {
         let r = cx.default_global::<Room>();
-        let g = r.inner.lock().unwrap();
+        let mut g = r.inner.lock().unwrap();
         let msg = Sync {
             kind: "share".into(),
             name: g.cfg.name.clone(),
-            video: Some(video),
+            video: Some(video.clone()),
             general: false,
             at: now_secs(),
             speed: 1.0,
             ..Default::default()
         };
-        match serde_json::to_string(&msg) {
+        let sent = match serde_json::to_string(&msg) {
             Ok(j) if g.out.is_some() => {
                 send_now(&g, &format!("TO {friend_id} {j}"));
                 true
             }
             _ => false,
+        };
+        if sent {
+            record_own(&mut g, "share", Some(video), false);
         }
+        sent
     };
     if sent {
         toast(cx, "Video shared");
@@ -665,6 +814,7 @@ pub fn share_to(friend_id: String, video: VideoItem, cx: &mut App) {
 }
 
 /// Sends a like/dislike to friends when the matching sharing setting is on.
+/// The action is recorded locally either way, so Social can show your activity.
 pub fn activity(action: &str, video: VideoItem, cx: &mut App) {
     let s = store::settings_snapshot();
     let on = match action {
@@ -672,22 +822,60 @@ pub fn activity(action: &str, video: VideoItem, cx: &mut App) {
         "dislike" => s.share_dislikes,
         _ => false,
     };
-    if !on {
-        return;
-    }
     let r = cx.default_global::<Room>();
-    let g = r.inner.lock().unwrap();
-    let msg = Sync {
-        kind: "activity".into(),
-        name: g.cfg.name.clone(),
-        action: action.to_string(),
-        video: Some(video),
-        general: true,
-        at: now_secs(),
-        speed: 1.0,
-        ..Default::default()
-    };
-    send_to_friends(&g, &msg);
+    let mut g = r.inner.lock().unwrap();
+    if on {
+        let msg = Sync {
+            kind: "activity".into(),
+            name: g.cfg.name.clone(),
+            action: action.to_string(),
+            video: Some(video.clone()),
+            general: true,
+            at: now_secs(),
+            speed: 1.0,
+            ..Default::default()
+        };
+        send_to_friends(&g, &msg);
+    }
+    record_own(&mut g, action, Some(video), on);
+}
+
+fn record_reaction(g: &mut Inner, from: String, action: &str) {
+    g.next_reaction = g.next_reaction.wrapping_add(1);
+    let seq = g.next_reaction;
+    g.reactions.push(Reaction { seq, from, action: action.to_string(), at: Instant::now() });
+    if g.reactions.len() > 40 {
+        g.reactions.remove(0);
+    }
+    g.reactions.retain(|r| r.at.elapsed() < Duration::from_secs(8));
+}
+
+/// Sends an emoji/GIF reaction to the room. The host is the authority: a guest
+/// sends it to the host, who rebroadcasts it to everyone.
+pub fn react(action: &str, cx: &mut App) {
+    {
+        let r = cx.default_global::<Room>();
+        let mut g = r.inner.lock().unwrap();
+        let Some(info) = g.room.clone() else { return };
+        let msg = Sync {
+            kind: "reaction".into(),
+            room: info.id.clone(),
+            host: info.host.clone(),
+            name: g.cfg.name.clone(),
+            action: action.to_string(),
+            at: now_secs(),
+            ..Default::default()
+        };
+        let Ok(j) = serde_json::to_string(&msg) else { return };
+        if g.host {
+            send_now(&g, &format!("ROOM {} {j}", info.id));
+            let name = g.cfg.name.clone();
+            record_reaction(&mut g, name, action);
+        } else {
+            send_now(&g, &format!("TO {} {j}", info.host));
+        }
+    }
+    cx.refresh_windows();
 }
 
 /// Unread direct shares, for the top-bar bell.
@@ -857,6 +1045,7 @@ fn handle_event(cx: &mut App, ev: Event) {
                 g.host = false;
                 g.ready = false;
                 g.last_sent = None;
+                g.members.clear();
                 g.error = Some(reason);
                 was
             };
@@ -963,6 +1152,28 @@ fn on_message(cx: &mut App, from: &str, msg: Sync) {
             }
             cx.refresh_windows();
         }
+        "reaction" => {
+            let (in_room, host) = {
+                let r = cx.default_global::<Room>();
+                let g = r.inner.lock().unwrap();
+                let in_room = g.room.as_ref().is_some_and(|r| r.id == msg.room);
+                (in_room && g.status == Status::InRoom, g.host)
+            };
+            if in_room {
+                let name = guest_name(&msg, from);
+                let r = cx.default_global::<Room>();
+                let mut g = r.inner.lock().unwrap();
+                record_reaction(&mut g, name, &msg.action);
+                if host {
+                    // A guest's reaction came through TO; fan it out to the room.
+                    if let Ok(j) = serde_json::to_string(&msg) {
+                        send_now(&g, &format!("ROOM {} {j}", msg.room));
+                    }
+                }
+                drop(g);
+                cx.refresh_windows();
+            }
+        }
         "invite" => {
             let inv = Invite { room: msg.room.clone(), host: msg.host.clone(), name: msg.name.clone() };
             let (room, host, who) = (inv.room.clone(), inv.host.clone(), inv.name.clone());
@@ -970,8 +1181,8 @@ fn on_message(cx: &mut App, from: &str, msg: Sync) {
                 let r = cx.default_global::<Room>();
                 r.inner.lock().unwrap().invite = Some(inv);
             }
-            let accept: std::sync::Arc<dyn Fn(&mut Window, &mut App)> = std::sync::Arc::new(move |_w, cx| {
-                join_room(cx, room.clone(), host.clone());
+            let accept: std::sync::Arc<dyn Fn(&mut Window, &mut App)> = std::sync::Arc::new(move |w, cx| {
+                join_room(w, cx, room.clone(), host.clone());
             });
             let decline: std::sync::Arc<dyn Fn(&mut Window, &mut App)> =
                 std::sync::Arc::new(move |_w, cx| decline_invite(cx));
@@ -989,6 +1200,15 @@ fn on_message(cx: &mut App, from: &str, msg: Sync) {
             };
             if ok {
                 apply_sync(cx, &msg, false);
+                let r = cx.default_global::<Room>();
+                let mut g = r.inner.lock().unwrap();
+                // The host owns the roster. Keep only what it sent.
+                g.members = msg
+                    .members
+                    .iter()
+                    .filter(|n| !n.trim().is_empty())
+                    .map(|n| Member { name: n.clone(), seen: Instant::now() })
+                    .collect();
             }
         }
         "intent" => {
@@ -998,17 +1218,63 @@ fn on_message(cx: &mut App, from: &str, msg: Sync) {
                 g.host && g.status == Status::InRoom && g.room.as_ref().is_some_and(|r| r.id == msg.room)
             };
             if ok {
-                apply_sync(cx, &msg, true);
+                let name = guest_name(&msg, from);
+                if msg.action == "leave" {
+                    let r = cx.default_global::<Room>();
+                    let mut g = r.inner.lock().unwrap();
+                    forget(&mut g, &name);
+                    g.dirty = true;
+                } else {
+                    {
+                        let r = cx.default_global::<Room>();
+                        let mut g = r.inner.lock().unwrap();
+                        if remember(&mut g, &name) {
+                            g.dirty = true;
+                        }
+                    }
+                    apply_sync(cx, &msg, true);
+                }
             }
         }
         "join" => {
-            let is_host = { cx.default_global::<Room>().inner.lock().unwrap().host };
-            if is_host {
+            let name = guest_name(&msg, from);
+            let r = cx.default_global::<Room>();
+            let mut g = r.inner.lock().unwrap();
+            if g.host {
+                remember(&mut g, &name);
                 // the next heartbeat (or forced send) brings the guest up to date
-                cx.default_global::<Room>().inner.lock().unwrap().dirty = true;
+                g.dirty = true;
+            }
+        }
+        "here" => {
+            let name = guest_name(&msg, from);
+            let r = cx.default_global::<Room>();
+            let mut g = r.inner.lock().unwrap();
+            if g.host {
+                if remember(&mut g, &name) {
+                    g.dirty = true;
+                }
+            }
+        }
+        "leave" => {
+            let name = guest_name(&msg, from);
+            let r = cx.default_global::<Room>();
+            let mut g = r.inner.lock().unwrap();
+            if g.host {
+                forget(&mut g, &name);
+                g.dirty = true;
             }
         }
         _ => {}
+    }
+}
+
+/// A guest's display name, falling back to the start of their id.
+fn guest_name(msg: &Sync, from: &str) -> String {
+    if msg.name.trim().is_empty() {
+        from.chars().take(8).collect()
+    } else {
+        msg.name.trim().to_string()
     }
 }
 
@@ -1078,6 +1344,17 @@ fn apply_sync(cx: &mut App, s: &Sync, from_guest: bool) {
 
 fn tick(cx: &mut App) {
     let now = Instant::now();
+    // Keep the reaction overlay alive while reactions are visible.
+    let animate = {
+        let r = cx.default_global::<Room>();
+        let mut g = r.inner.lock().unwrap();
+        let before = g.reactions.len();
+        g.reactions.retain(|r| r.at.elapsed() < Duration::from_secs(6));
+        !g.reactions.is_empty() || g.reactions.len() != before
+    };
+    if animate {
+        cx.refresh_windows();
+    }
     // Hosting: advertise the room to friends so they can join without an invite.
     {
         let r = cx.default_global::<Room>();
@@ -1110,15 +1387,38 @@ fn tick(cx: &mut App) {
             }
             g.who = now;
         }
+        // Guests tell the host they are still here; the host expires the quiet.
+        if g.status == Status::InRoom && !g.host && now.duration_since(g.here) >= Duration::from_secs(5) {
+            if let Some(info) = &g.room {
+                let msg = Sync {
+                    kind: "here".into(),
+                    room: info.id.clone(),
+                    host: info.host.clone(),
+                    name: g.cfg.name.clone(),
+                    ..Default::default()
+                };
+                if let Ok(j) = serde_json::to_string(&msg) {
+                    send_now(&g, &format!("TO {} {j}", info.host));
+                }
+            }
+            g.here = now;
+        }
+        if g.host {
+            let before = g.members.len();
+            g.members.retain(|m| m.seen.elapsed() < Duration::from_secs(12));
+            if g.members.len() != before {
+                g.dirty = true;
+            }
+        }
     }
-    let (host, room_id, host_id, last_sent, obs, beat, ready, dirty) = {
+    let (host, room_id, host_id, last_sent, members, obs, beat, ready, dirty) = {
         let r = cx.default_global::<Room>();
         let g = r.inner.lock().unwrap();
         if g.status != Status::InRoom {
             return;
         }
         let Some(info) = &g.room else { return };
-        (g.host, info.id.clone(), info.host.clone(), g.last_sent.clone(), g.obs, g.beat, g.ready, g.dirty)
+        (g.host, info.id.clone(), info.host.clone(), g.last_sent.clone(), roster(&g), g.obs, g.beat, g.ready, g.dirty)
     };
     if !host && !ready {
         return;
@@ -1173,6 +1473,7 @@ fn tick(cx: &mut App) {
         speed,
         queue,
         qpos,
+        members: members.clone(),
         full: true,
         ..Default::default()
     };
@@ -1192,6 +1493,7 @@ fn tick(cx: &mut App) {
             speed,
             queue: Vec::new(),
             qpos: None,
+            members,
             ..Default::default()
         }
     };
@@ -1205,5 +1507,59 @@ fn tick(cx: &mut App) {
         g.beat = now;
         g.dirty = false;
         g.obs = new_obs;
+    }
+}
+
+
+#[cfg(test)]
+mod presence_tests {
+    use super::{forget, guest_name, remember, roster, Inner, Sync};
+
+    fn test_inner() -> Inner {
+        let mut g = Inner::new();
+        g.cfg.name = "Me".into();
+        g
+    }
+
+    #[test]
+    fn roster_puts_you_first_and_never_duplicates() {
+        let mut g = test_inner();
+        assert_eq!(roster(&g), vec!["Me".to_string()]);
+        assert!(remember(&mut g, "Alice"));
+        assert_eq!(roster(&g), vec!["Me".to_string(), "Alice".to_string()]);
+        // hearing from the same guest again does not add a second row
+        assert!(!remember(&mut g, "Alice"));
+        assert_eq!(roster(&g), vec!["Me".to_string(), "Alice".to_string()]);
+        // a guest using your display name cannot shadow you
+        remember(&mut g, "Me");
+        assert_eq!(roster(&g), vec!["Me".to_string(), "Alice".to_string()]);
+        forget(&mut g, "Alice");
+        assert_eq!(roster(&g), vec!["Me".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_name_falls_back_to_the_id() {
+        let msg = Sync { name: String::new(), ..Default::default() };
+        assert_eq!(guest_name(&msg, "abcdef0123456789"), "abcdef01");
+        let msg = Sync { name: "  Alice ".into(), ..Default::default() };
+        assert_eq!(guest_name(&msg, "abcdef0123456789"), "Alice");
+    }
+}
+#[cfg(test)]
+mod queue_tests {
+    use super::moved_pos;
+
+    #[test]
+    fn reordering_keeps_the_playing_row_pointing_at_the_same_video() {
+        // moving rows after the current one does not move the current row
+        assert_eq!(moved_pos(0, 2, 1), 0);
+        // moving the current row follows it
+        assert_eq!(moved_pos(1, 1, 3), 3);
+        // moving a row from before the current one down past it shifts it down
+        assert_eq!(moved_pos(2, 0, 2), 1);
+        // moving a row from after the current one up to the top shifts it up
+        assert_eq!(moved_pos(0, 2, 0), 1);
+        // a move that stays before the current row leaves it alone
+        assert_eq!(moved_pos(3, 1, 0), 3);
     }
 }

@@ -829,10 +829,20 @@ impl WatchPage {
                             .child(pill("w-share", Some("share-2"), "Share", cx).on_click(move |ev, window, cx| {
                                 let url = format!("https://youtu.be/{share_id}");
                                 let video = v_share.clone();
-                                let items = vec![
+                                let mut items = vec![
                                     crate::ui::app::MenuItem::new("link", "Copy link", move |_, cx| copy_to_clipboard(url.clone(), cx)),
-                                    crate::ui::app::MenuItem::new("users", "Share with friends", move |_, cx| crate::room::share_all(video.clone(), cx)),
+                                    crate::ui::app::MenuItem::new("users", "Share with friends", {
+                                        let video = video.clone();
+                                        move |_, cx| crate::room::share_all(video.clone(), cx)
+                                    }),
                                 ];
+                                for f in crate::room::snapshot(cx).cfg.friends.into_iter().take(12) {
+                                    let (id, name) = (f.id.clone(), f.name.clone());
+                                    let video = video.clone();
+                                    items.push(crate::ui::app::MenuItem::new("users", format!("Send to {name}"), move |_, cx| {
+                                        crate::room::share_to(id.clone(), video.clone(), cx)
+                                    }));
+                                }
                                 crate::ui::app::open_menu(ev.position(), items, window, cx);
                             }))
                             .when(crate::room::in_room(cx), |d| {

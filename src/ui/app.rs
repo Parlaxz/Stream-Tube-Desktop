@@ -53,6 +53,12 @@ impl Route {
     }
 }
 
+/// Routes that own a full-page video player. They share the watch page's
+/// layout rules: no permanent sidebar, a drawer instead, theater and fullscreen.
+fn video_route(route: &Route) -> bool {
+    matches!(route, Route::Watch { .. } | Route::Room)
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct UiState {
     pub fullscreen: bool,
@@ -353,45 +359,41 @@ pub fn room_player(cx: &App) -> Option<Entity<Player>> {
 
 /// Shows the room tab, opening one if needed. The room lives in its own tab so
 /// browsing never replaces it.
-pub fn open_room(cx: &mut App) {
-    let pip = crate::ui::pip::handle(cx);
-    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
-    let _ = win.update(cx, |_, window, cx| {
-        let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
-        app.update(cx, |a, cx| {
-            if matches!(&a.route, Route::Room) {
-                return;
-            }
-            if let Some(i) = a.tabs.iter().position(|t| matches!(&t.route, Route::Room)) {
-                a.switch_tab(i, window, cx);
-            } else {
-                a.new_tab(Route::Room, None, None, true, window, cx);
-            }
-        });
+///
+/// Callers are UI handlers that already hold the window, so this updates the
+/// AppView directly. Going through `WindowHandle::update` here would fail: the
+/// window is already on the update stack while its event is being handled.
+pub fn open_room(window: &mut Window, cx: &mut App) {
+    let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
+    app.update(cx, |a, cx| {
+        if matches!(&a.route, Route::Room) {
+            return;
+        }
+        if let Some(i) = a.tabs.iter().position(|t| matches!(&t.route, Route::Room)) {
+            a.switch_tab(i, window, cx);
+        } else {
+            a.new_tab(Route::Room, None, None, true, window, cx);
+        }
     });
 }
 
 /// Closes the room tab, which leaves the room. Used by every "Leave room"
 /// button so the tab and the room state never drift apart.
-pub fn close_room(cx: &mut App) {
-    let pip = crate::ui::pip::handle(cx);
-    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else {
+pub fn close_room(window: &mut Window, cx: &mut App) {
+    let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else {
         crate::room::leave_room(cx);
         return;
     };
-    let _ = win.update(cx, |_, window, cx| {
-        let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
-        app.update(cx, |a, cx| {
-            let found = (0..a.tabs.len()).find(|&i| {
-                let route = if i == a.active_tab { &a.route } else { &a.tabs[i].route };
-                matches!(route, Route::Room)
-            });
-            if let Some(i) = found {
-                a.close_tab(i, window, cx);
-            } else {
-                crate::room::leave_room(cx);
-            }
+    app.update(cx, |a, cx| {
+        let found = (0..a.tabs.len()).find(|&i| {
+            let route = if i == a.active_tab { &a.route } else { &a.tabs[i].route };
+            matches!(route, Route::Room)
         });
+        if let Some(i) = found {
+            a.close_tab(i, window, cx);
+        } else {
+            crate::room::leave_room(cx);
+        }
     });
 }
 
@@ -405,21 +407,14 @@ pub fn recent_video(cx: &App) -> Option<VideoItem> {
 
 /// Shows Settings in its own tab (reusing an open one), leaving the video tab
 /// alone instead of replacing it.
-pub fn open_settings(cx: &mut App) {
-    // Settings gets its own tab (or the open one). The video tab keeps playing.
-    let pip = crate::ui::pip::handle(cx);
-    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
-    let _ = win.update(cx, |_, window, cx| {
-        let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
-        app.update(cx, |a, cx| a.open_settings_tab(window, cx));
-    });
+pub fn open_settings(window: &mut Window, cx: &mut App) {
+    let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
+    app.update(cx, |a, cx| a.open_settings_tab(window, cx));
 }
 
 /// Opens the Social page (friends, rooms, activity).
-pub fn open_social(cx: &mut App) {
-    let pip = crate::ui::pip::handle(cx);
-    let Some(win) = cx.windows().into_iter().find(|w| Some(*w) != pip) else { return };
-    let _ = win.update(cx, |_, window, cx| navigate(Route::Social, window, cx));
+pub fn open_social(window: &mut Window, cx: &mut App) {
+    navigate(Route::Social, window, cx);
 }
 
 pub fn is_current_page(page: EntityId, cx: &App) -> bool {
@@ -839,6 +834,7 @@ pub struct AppView {
     /// bounded cache for every thumbnail and avatar in this window
     images: Entity<crate::ui::image_cache::LruImageCache>,
     had_video: bool,
+    had_paused: bool,
     last_bounds_save: std::time::Instant,
     dialog: Option<Dialog>,
     /// the signed-in account's playlists for the Save dialog (None while loading)
@@ -876,6 +872,8 @@ pub struct AppView {
     tab_grid_group: Option<u64>,
     tab_grid_cols: u32,
     tab_sort: String,
+    /// ascending when false; toggled by clicking the active sort again
+    tab_sort_desc: bool,
     /// group pill under a dragged tab (0 = the All pill)
     drag_hover_group: Option<u64>,
     /// group that just received a dragged tab (brief highlight)
@@ -1034,9 +1032,13 @@ impl AppView {
         // Only re-render the shell when the mini player appears/disappears; the
         // player views re-render themselves for every frame.
         let player_sub = cx.observe(&p, |this: &mut Self, p, cx| {
-            let has = p.read(cx).video.is_some();
-            if has != this.had_video {
+            let p = p.read(cx);
+            let has = p.video.is_some();
+            let paused = p.paused;
+            // the tab rail shows a playing badge, so a pause/play also re-renders
+            if has != this.had_video || paused != this.had_paused {
                 this.had_video = has;
+                this.had_paused = paused;
                 cx.notify();
             }
         });
@@ -1154,6 +1156,7 @@ impl AppView {
             preview_view,
             images,
             had_video: false,
+            had_paused: true,
             last_bounds_save: std::time::Instant::now(),
             dialog: None,
             yt_playlists: None,
@@ -1165,6 +1168,7 @@ impl AppView {
             tab_grid_group: None,
             tab_grid_cols: store::kv_get("tab_grid_cols").and_then(|s| s.parse().ok()).unwrap_or(6),
             tab_sort: store::kv_get("tab_sort").unwrap_or_else(|| "manual".into()),
+            tab_sort_desc: store::kv_get("tab_sort_desc").as_deref() != Some("0"),
             drag_hover_group: None,
             group_flash: None,
             focus,
@@ -1569,7 +1573,7 @@ impl AppView {
                     MenuItem::new("history", t("History"), |window, cx| navigate(Route::History, window, cx)),
                     MenuItem::new("list-video", t("Playlists"), |window, cx| navigate(Route::Library, window, cx)),
                     MenuItem::new("download", t("Downloads"), |window, cx| navigate(Route::Downloads, window, cx)),
-                    MenuItem::new("settings", t("Settings"), |_window, cx| open_settings(cx)),
+                    MenuItem::new("settings", t("Settings"), |window, cx| open_settings(window, cx)),
                     MenuItem::new("refresh-cw", t("Sync subscriptions"), |_, cx| {
                         cx.spawn(async move |cx| {
                             let res = blocking(crate::api::auth::sync_subscriptions).await;
@@ -1637,7 +1641,7 @@ impl AppView {
             return;
         }
         crate::ui::slot::clear_slot(cx);
-        if cx.global::<UiState>().fullscreen && !matches!(route, Route::Watch { .. } | Route::Shorts(_)) {
+        if cx.global::<UiState>().fullscreen && !(video_route(&route) || matches!(route, Route::Shorts(_))) {
             exit_fullscreen(window, cx);
         }
         let page = build_page(&route, window, cx);
@@ -1770,7 +1774,7 @@ impl AppView {
             None => build_page(&self.route.clone(), window, cx),
         };
         crate::ui::slot::clear_slot(cx);
-        if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
+        if cx.global::<UiState>().fullscreen && !(video_route(&self.route) || matches!(&self.route, Route::Shorts(_))) {
             exit_fullscreen(window, cx);
         }
         let pl = next.player.clone();
@@ -1785,13 +1789,21 @@ impl AppView {
         cx.notify();
     }
 
-    /// Watches the active tab's player for the mini player appearing/disappearing.
+    /// Watches the active tab's player for the mini player or playing badge
+    /// appearing/disappearing.
     fn follow_player(&mut self, player: Entity<Player>, cx: &mut Context<Self>) {
-        self.had_video = player.read(cx).video.is_some();
+        {
+            let p = player.read(cx);
+            self.had_video = p.video.is_some();
+            self.had_paused = p.paused;
+        }
         self.player_sub = cx.observe(&player, |this: &mut Self, p, cx| {
-            let has = p.read(cx).video.is_some();
-            if has != this.had_video {
+            let p = p.read(cx);
+            let has = p.video.is_some();
+            let paused = p.paused;
+            if has != this.had_video || paused != this.had_paused {
                 this.had_video = has;
+                this.had_paused = paused;
                 cx.notify();
             }
         });
@@ -1809,9 +1821,9 @@ impl AppView {
             crate::room::leave_room(cx);
         }
         if index == self.active_tab {
-            // show the neighbour first, then drop this one
-            let to = if index + 1 < self.tabs.len() { index + 1 } else { index - 1 };
-            self.switch_tab(to, window, cx);
+            // closing the shown tab returns to Home instead of activating a
+            // neighbour, which could expand a collapsed group and start its video
+            self.switch_tab(0, window, cx);
         }
         self.tabs.remove(index);
         if index < self.active_tab {
@@ -1945,13 +1957,9 @@ impl AppView {
                     }))
                     .on_aux_click(cx.listener(move |this, _, window, cx| this.open_group_editor(gid, window, cx)))
                     .on_drag_move::<TabDrag>(cx.listener(move |this, _, _, cx| {
+                        // only clicking a group toggles it; a drag highlights it
                         let changed = this.drag_hover_group != Some(gid);
                         this.drag_hover_group = Some(gid);
-                        if let Some(g) = this.groups.iter_mut().find(|g| g.id == gid) {
-                            if g.collapsed {
-                                g.collapsed = false;
-                            }
-                        }
                         if changed {
                             cx.notify();
                         }
@@ -1961,6 +1969,10 @@ impl AppView {
         }
         for i in 0..self.tabs.len() {
             let active = i == self.active_tab;
+            let playing = {
+                let pl = self.tabs[i].player.read(cx);
+                pl.video.is_some() && !pl.paused
+            };
             // the pinned Home tab is an icon only: no label, no close, no drag
             let pinned = i == 0;
             let route = if active { self.route.clone() } else { self.tabs[i].route.clone() };
@@ -1994,6 +2006,8 @@ impl AppView {
                 .cursor_pointer()
                 .when(active, |d| d.bg(p.surface2))
                 .when(!active, |d| d.hover(|d| d.bg(p.hover)))
+                // the tab that is actually playing gets a tinted background and outline
+                .when(playing, |d| d.bg(p.accent.opacity(0.16)).border_1().border_color(p.accent))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if let Some(i) = this.tabs.iter().position(|t| t.id == id) {
                         this.switch_tab(i, window, cx);
@@ -2034,6 +2048,7 @@ impl AppView {
                             .text_color(if active { p.text } else { p.text2 })
                             .child(label.clone()),
                     )
+                    .when(playing, |d| d.child(icon("headphones").size_3p5().text_color(p.accent)))
                     .child(
                         div()
                             .id(("tab-close", id))
@@ -2282,6 +2297,7 @@ impl AppView {
             return None;
         }
         let p = pal(cx);
+        let hide_views = store::settings_snapshot().hide_view_counts;
         let n = self.tabs.len().saturating_sub(1).max(1);
         let cols = if self.tab_grid_dynamic {
             let rows = ((n as f64).sqrt().floor() as usize).max(1);
@@ -2308,13 +2324,26 @@ impl AppView {
                 order.retain(|&i| self.tabs[i].group.is_none());
             }
             let video_of = |i: usize| self.tabs[i].player.read(cx).video.clone();
+            let mut sorted = false;
             match self.tab_sort.as_str() {
-                "length" => order.sort_by_key(|&i| std::cmp::Reverse(video_of(i).and_then(|v| v.duration_secs).unwrap_or(0))),
-                "recent" => order.sort_by_key(|&i| std::cmp::Reverse(video_of(i).and_then(|v| v.published_ts).unwrap_or(0))),
-                "views" => order.sort_by_key(|&i| {
-                    std::cmp::Reverse(video_of(i).and_then(|v| v.views_text.as_deref().and_then(crate::api::json::parse_count)).unwrap_or(0))
-                }),
+                "length" => {
+                    order.sort_by_key(|&i| video_of(i).and_then(|v| v.duration_secs).unwrap_or(0));
+                    sorted = true;
+                }
+                "recent" => {
+                    order.sort_by_key(|&i| video_of(i).and_then(|v| v.published_ts).unwrap_or(0));
+                    sorted = true;
+                }
+                "views" => {
+                    order.sort_by_key(|&i| {
+                        video_of(i).and_then(|v| v.views_text.as_deref().and_then(crate::api::json::parse_count)).unwrap_or(0)
+                    });
+                    sorted = true;
+                }
                 _ => {}
+            }
+            if sorted && self.tab_sort_desc {
+                order.reverse();
             }
             order
         };
@@ -2323,6 +2352,10 @@ impl AppView {
         for &i in &order {
             let tab = &self.tabs[i];
             let active = i == self.active_tab;
+            let playing = {
+                let pl = tab.player.read(cx);
+                pl.video.is_some() && !pl.paused
+            };
             let route = if active { self.route.clone() } else { tab.route.clone() };
             let label = Self::tab_label(&route, if active { None } else { tab.title.as_deref() }, &tab.player, cx);
             let icon_name = Self::tab_icon(&route);
@@ -2398,6 +2431,27 @@ impl AppView {
                         .child(display_name),
                 );
             }
+            if let Some(v) = tab.player.read(cx).video.as_ref() {
+                let mut parts: Vec<String> = Vec::new();
+                if !hide_views {
+                    if let Some(vw) = &v.views_text {
+                        parts.push(vw.clone());
+                    }
+                }
+                if v.is_live {
+                    parts.push("LIVE".into());
+                } else {
+                    if let Some(published) = v.published_text.clone().or_else(|| v.published_ts.map(crate::ui::cards::published_age)) {
+                        parts.push(published);
+                    }
+                    if let Some(length) = v.duration_text.clone().or_else(|| v.duration_secs.map(crate::api::json::format_duration)) {
+                        parts.push(length);
+                    }
+                }
+                if !parts.is_empty() {
+                    text = text.child(div().text_xs().text_color(p.text2).truncate().child(parts.join(" • ")));
+                }
+            }
             heading = heading.child(text);
             grid = grid.child(
                 div()
@@ -2410,6 +2464,7 @@ impl AppView {
                     .rounded_xl()
                     .hover(|d| d.bg(p.hover))
                     .active(|d| d.bg(p.surface2))
+                    .when(playing, |d| d.bg(p.accent.opacity(0.08)))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if this.closing_grid_tabs.contains(&id) {
@@ -2446,9 +2501,24 @@ impl AppView {
                             .overflow_hidden()
                             .rounded_lg()
                             .bg(p.surface2)
-                            .when(active, |d| d.border_2().border_color(p.accent))
-                            .when(!active, |d| d.border_1().border_color(p.border))
+                            .when(active || playing, |d| d.border_2().border_color(p.accent))
+                            .when(!active && !playing, |d| d.border_1().border_color(p.border))
                             .child(picture)
+                            .when(playing, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .left_1()
+                                        .bottom_1()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(22.))
+                                        .rounded_full()
+                                        .bg(p.accent)
+                                        .child(icon("headphones").size_3().text_color(white())),
+                                )
+                            })
                             .when(id != 0, |d| {
                                 d.child(
                                     icon_button(("tg-tab-close", id), "x", cx)
@@ -2489,7 +2559,26 @@ impl AppView {
         }
 
         // ── group rail, non-video pills and view controls ──
-        let groups = self.groups.clone();
+        let mut groups = self.groups.clone();
+        // the same sort orders the group pills: a group's key is its members'
+        if self.tab_sort != "manual" {
+            let video_of = |i: usize| self.tabs[i].player.read(cx).video.clone();
+            let key = |gid: u64| -> i64 {
+                let members = (0..self.tabs.len()).filter(|&i| i != 0 && self.tabs[i].group == Some(gid));
+                match self.tab_sort.as_str() {
+                    "length" => members.filter_map(|i| video_of(i).and_then(|v| v.duration_secs)).map(|d| d as i64).sum(),
+                    "recent" => members.filter_map(|i| video_of(i).and_then(|v| v.published_ts)).max().unwrap_or(0),
+                    "views" => members
+                        .filter_map(|i| video_of(i).and_then(|v| v.views_text.as_deref().and_then(crate::api::json::parse_count)))
+                        .sum::<u64>() as i64,
+                    _ => 0,
+                }
+            };
+            groups.sort_by_key(|g| key(g.id));
+            if self.tab_sort_desc {
+                groups.reverse();
+            }
+        }
         let pill_base = |d: Stateful<Div>| {
             d.flex()
                 .items_center()
@@ -2598,35 +2687,46 @@ impl AppView {
             );
         }
 
-        let cols_label = if self.tab_grid_dynamic { "Dynamic".to_string() } else { format!("{} columns", self.tab_grid_cols) };
-        let columns_pill = div()
-            .id("tg-cols")
+        let view_btn = |id: &'static str, name: &'static str, tip: &'static str, selected: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(28.))
+                .rounded_full()
+                .bg(if selected { p.accent } else { p.chip })
+                .cursor_pointer()
+                .hover(move |d| d.bg(p.hover))
+                .child(icon(name).size_4().text_color(if selected { white() } else { p.text2 }))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+        };
+        let dynamic_sel = self.tab_grid_dynamic;
+        let four_sel = !self.tab_grid_dynamic && self.tab_grid_cols < 5;
+        let six_sel = !self.tab_grid_dynamic && self.tab_grid_cols >= 5;
+        let columns_group = div()
             .flex()
             .items_center()
-            .px_3()
-            .h(px(28.))
-            .rounded_full()
-            .bg(p.chip)
-            .text_sm()
-            .text_color(p.text)
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.tab_grid_dynamic {
-                    this.tab_grid_dynamic = false;
-                    this.tab_grid_cols = 4;
-                } else if this.tab_grid_cols <= 4 {
-                    this.tab_grid_cols = 6;
-                } else if this.tab_grid_cols <= 6 {
-                    this.tab_grid_cols = 8;
-                } else {
-                    this.tab_grid_dynamic = true;
-                    this.tab_grid_cols = 6;
-                }
-                store::kv_set("tab_grid_dynamic", if this.tab_grid_dynamic { "1" } else { "0" });
-                store::kv_set("tab_grid_cols", &this.tab_grid_cols.to_string());
+            .gap_1()
+            .child(view_btn("tg-cols-dyn", "layout-grid", "Dynamic", dynamic_sel).on_click(cx.listener(|this, _, _, cx| {
+                this.tab_grid_dynamic = true;
+                store::kv_set("tab_grid_dynamic", "1");
                 cx.notify();
-            }))
-            .child(cols_label);
+            })))
+            .child(view_btn("tg-cols-4", "grid-2x2", "4 columns", four_sel).on_click(cx.listener(|this, _, _, cx| {
+                this.tab_grid_dynamic = false;
+                this.tab_grid_cols = 4;
+                store::kv_set("tab_grid_dynamic", "0");
+                store::kv_set("tab_grid_cols", "4");
+                cx.notify();
+            })))
+            .child(view_btn("tg-cols-6", "grid-3x3", "6 columns", six_sel).on_click(cx.listener(|this, _, _, cx| {
+                this.tab_grid_dynamic = false;
+                this.tab_grid_cols = 6;
+                store::kv_set("tab_grid_dynamic", "0");
+                store::kv_set("tab_grid_cols", "6");
+                cx.notify();
+            })));
 
         let sort_label = match self.tab_sort.as_str() {
             "length" => "Length",
@@ -2634,29 +2734,48 @@ impl AppView {
             "views" => "Views",
             _ => "Manual",
         };
+        let sort_icon = if self.tab_sort == "manual" {
+            "chevrons-up-down"
+        } else if self.tab_sort_desc {
+            "sort-descending"
+        } else {
+            "sort-ascending"
+        };
         let sort_pill = div()
             .id("tg-sort")
             .flex()
             .items_center()
+            .gap_2()
             .px_3()
             .h(px(28.))
             .rounded_full()
             .bg(p.chip)
+            .hover(move |d| d.bg(p.hover))
             .text_sm()
             .text_color(p.text)
             .cursor_pointer()
+            .child(icon(sort_icon).size_4().text_color(p.text2))
+            .child(sort_label)
+            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(t("Sort")).build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.tab_sort = match this.tab_sort.as_str() {
-                    "manual" => "length",
-                    "length" => "recent",
-                    "recent" => "views",
-                    _ => "manual",
+                if this.tab_sort == "manual" {
+                    this.tab_sort = "length".into();
+                    this.tab_sort_desc = false;
+                } else if !this.tab_sort_desc {
+                    this.tab_sort_desc = true;
+                } else {
+                    this.tab_sort = match this.tab_sort.as_str() {
+                        "length" => "recent",
+                        "recent" => "views",
+                        _ => "manual",
+                    }
+                    .to_string();
+                    this.tab_sort_desc = false;
                 }
-                .to_string();
                 store::kv_set("tab_sort", &this.tab_sort);
+                store::kv_set("tab_sort_desc", if this.tab_sort_desc { "1" } else { "0" });
                 cx.notify();
-            }))
-            .child(sort_label);
+            }));
 
         // group editor replaces the grid while open
         let content = if let Some(g) = self.editing_group.and_then(|id| self.group(id)).cloned() {
@@ -2840,9 +2959,9 @@ impl AppView {
                                             .gap_3()
                                             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(format!("Tabs ({n})")))
                                             .child(group_row)
-                                            .child(columns_pill)
-                                            .child(sort_pill)
                                             .child(div().flex_1())
+                                            .child(columns_group)
+                                            .child(sort_pill)
                                             .child(icon_button("tg-close", "x", cx).on_click(cx.listener(|this, _, _, cx| {
                                                 this.tab_grid_open = false;
                                                 this.editing_group = None;
@@ -2865,7 +2984,7 @@ impl AppView {
             let cur_p = std::mem::replace(&mut self.page, p);
             self.tabs[self.active_tab].route = self.route.clone();
             self.forward.push((cur_r, cur_p));
-            if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
+            if cx.global::<UiState>().fullscreen && !(video_route(&self.route) || matches!(&self.route, Route::Shorts(_))) {
                 toggle_fullscreen(window, cx);
             }
             // If we return to a watch page for a different video than is playing, rebuild it
@@ -2888,7 +3007,7 @@ impl AppView {
             let cur_p = std::mem::replace(&mut self.page, p);
             self.tabs[self.active_tab].route = self.route.clone();
             self.history.push((cur_r, cur_p));
-            if cx.global::<UiState>().fullscreen && !matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
+            if cx.global::<UiState>().fullscreen && !(video_route(&self.route) || matches!(&self.route, Route::Shorts(_))) {
                 toggle_fullscreen(window, cx);
             }
             window.set_window_title(&format!("{} - Stream Tube", self.route.title()));
@@ -3436,7 +3555,7 @@ impl AppView {
         // scrolling from the keyboard: PageUp/PageDown everywhere; the arrows,
         // Home/End and Space too on pages without a big player (on the watch page
         // they seek, change the volume and pause)
-        let watching = matches!(self.route, Route::Watch { .. } | Route::Shorts(_));
+        let watching = video_route(&self.route) || matches!(&self.route, Route::Shorts(_));
         let scroll_key = matches!(k, "pageup" | "pagedown")
             || (!watching && matches!(k, "up" | "down" | "home" | "end"))
             || (!watching && k == "space" && player(cx).read(cx).video.is_none());
@@ -3590,7 +3709,7 @@ impl AppView {
             ("'", _) => toggle_windowed_fullscreen(window, cx),
             ("t", false) => toggle_theater_mode(cx),
             ("i", false) => {
-                if matches!(self.route, Route::Watch { .. } | Route::Shorts(_)) {
+                if video_route(&self.route) || matches!(&self.route, Route::Shorts(_)) {
                     if self.history.is_empty() {
                         self.go(Route::Home, window, cx);
                     } else {
@@ -3648,7 +3767,7 @@ impl AppView {
                     .items_center()
                     .gap_2()
                     .child(icon_button("menu", "menu", cx).on_click(cx.listener(|this, _, _, cx| {
-                        if matches!(this.route, Route::Watch { .. }) {
+                        if video_route(&this.route) {
                             this.drawer_open ^= true;
                         } else {
                             cx.global_mut::<UiState>().sidebar_open ^= true;
@@ -3797,7 +3916,7 @@ impl AppView {
         let p = pal(cx);
         let ui = *cx.global::<UiState>();
         let route = self.route.clone();
-        let is_watch = matches!(route, Route::Watch { .. });
+        let is_watch = video_route(&route);
         let s = store::settings_snapshot();
         if !ui.sidebar_open && !is_watch {
             // compact rail
@@ -4053,7 +4172,7 @@ impl AppView {
 
     /// The sidebar as a slide-over on the watch page.
     fn render_drawer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.drawer_open || !matches!(self.route, Route::Watch { .. }) {
+        if !self.drawer_open || !video_route(&self.route) {
             return None;
         }
         let p = pal(cx);
@@ -4883,11 +5002,12 @@ impl Render for AppView {
         if (f32::from(window.rem_size()) - 16.0 * scale).abs() > 0.01 {
             window.set_rem_size(px(16.0 * scale));
         }
-        let is_watch = matches!(self.route, Route::Watch { .. });
+        let is_watch = video_route(&self.route);
         let is_shorts = matches!(self.route, Route::Shorts(_));
         let ui = cx.global_mut::<UiState>();
         ui.viewport = window.viewport_size();
         ui.shorts = is_shorts;
+        ui.theater = store::settings_snapshot().theater_mode;
         let fullscreen = ui.fullscreen && (is_watch || is_shorts);
         let mut root = div()
             .image_cache(self.images.clone())
@@ -4949,6 +5069,7 @@ impl Render for AppView {
                     ),
             )
             .when(has_slot, |d| d.child(crate::ui::pip::main_surface(&self.main_view, cx)))
+            .when(matches!(self.route, Route::Room), |d| d.child(room::reactions_overlay(cx)))
             // only over a thumbnail drawn on this page (the slot is cleared when a
             // preview stops or moves to another video)
             .when(

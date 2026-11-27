@@ -826,6 +826,7 @@ impl SettingsPage {
 
     fn tweaks(&self, cx: &mut Context<Self>) -> Div {
         let s = store::settings_snapshot();
+        let p = pal(cx);
         card(cx)
             .child(row("Shorts: play next automatically", "Move to the next Short when one ends", switch("sha", s.shorts_autoadvance, |s, v| s.shorts_autoadvance = v, cx), cx))
             .child(row(
@@ -849,6 +850,22 @@ impl SettingsPage {
                 self.choice("shade", &[("light".to_string(), "Subtle"), ("default".to_string(), "Default"), ("strong".to_string(), "Strong")], s.controls_shade.clone(), |s, v| s.controls_shade = v, cx),
                 cx,
             ))
+            .child(
+                div()
+                    .pt_4()
+                    .pb_1()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.text)
+                    .child("Player buttons"),
+            )
+            .child(row("Captions", "Subtitle track button", switch("pc-cc", s.show_captions_button, |s, v| s.show_captions_button = v, cx), cx))
+            .child(row("Screenshot", "Save the current frame", switch("pc-shot", s.show_screenshot_button, |s, v| s.show_screenshot_button = v, cx), cx))
+            .child(row("PiP and mini player", "Picture-in-picture and go-back-keep-playing buttons", switch("pc-pip", s.show_pip_buttons, |s, v| s.show_pip_buttons = v, cx), cx))
+            .child(row("Speed controls", "Minus, speed label and plus", switch("pc-spd", s.show_speed_buttons, |s, v| s.show_speed_buttons = v, cx), cx))
+            .child(row("Theater mode", "", switch("pc-theater", s.show_theater_button, |s, v| s.show_theater_button = v, cx), cx))
+            .child(row("Windowed fullscreen", "Fit the window to the screen", switch("pc-wfs", s.show_windowed_fullscreen_button, |s, v| s.show_windowed_fullscreen_button = v, cx), cx))
+            .child(row("Fullscreen", "Remove the window frame", switch("pc-fs", s.show_fullscreen_button, |s, v| s.show_fullscreen_button = v, cx), cx))
     }
 
     fn general(&self, cx: &mut Context<Self>) -> Div {

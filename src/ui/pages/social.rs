@@ -161,14 +161,14 @@ impl Render for SocialPage {
                     .child(field("Your name", &self.name, 140., p))
                     .child(
                         button("room-connect", if snap.status == room::Status::Offline { "Connect" } else { "Reconnect" }, p, true)
-                            .on_click(cx.listener(|this, _, _window, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 let relay = this.relay.read(cx).value().trim().to_string();
                                 let token = this.token.read(cx).value().trim().to_string();
                                 let name = this.name.read(cx).value().trim().to_string();
                                 // A reconnect ends the old session cleanly: one
                                 // socket, and a room cannot outlive its relay.
                                 if room::snapshot(cx).status != room::Status::Offline {
-                                    room::disconnect(cx);
+                                    room::disconnect(window, cx);
                                 }
                                 room::save_settings(relay, token, name, cx);
                                 room::connect(cx);
@@ -184,8 +184,8 @@ impl Render for SocialPage {
                     .child(dot(connected, p))
                     .child(div().text_sm().text_color(status_color).child(status.to_string()))
                     .when(connected, |d| {
-                        d.child(button("room-off", "Disconnect", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                            room::disconnect(cx);
+                        d.child(button("room-off", "Disconnect", p, false).on_click(cx.listener(|_, _, w, cx| {
+                            room::disconnect(w, cx);
                             cx.notify();
                         })))
                     }),
@@ -236,12 +236,10 @@ impl Render for SocialPage {
         if snap.cfg.friends.is_empty() {
             friends = friends.child(div().text_sm().text_color(p.text3).child("Add a friend by their code."));
         }
-        let has_video = crate::room::current_video(cx).is_some();
         for f in snap.cfg.friends.clone() {
             let online = snap.online.iter().any(|x| x == &f.id);
             let can_invite = snap.host && snap.room.is_some() && online;
             let fid = f.id.clone();
-            let send_id = f.id.clone();
             let short: String = f.id.chars().take(12).collect();
             friends = friends.child(
                 div()
@@ -256,16 +254,6 @@ impl Render for SocialPage {
                         d.child(button(SharedString::from(format!("room-inv-{}", f.id)), "Invite", p, false).on_click(
                             cx.listener(move |_, _, _w, cx| {
                                 room::invite(cx, fid.clone());
-                                cx.notify();
-                            }),
-                        ))
-                    })
-                    .when(has_video, |d| {
-                        d.child(button(SharedString::from(format!("social-send-{}", f.id)), "Send", p, false).on_click(
-                            cx.listener(move |_, _, _w, cx| {
-                                if let Some(v) = crate::room::current_video(cx) {
-                                    room::share_to(send_id.clone(), v, cx);
-                                }
                                 cx.notify();
                             }),
                         ))
@@ -289,20 +277,20 @@ impl Render for SocialPage {
             room_card = room_card
                 .child(div().flex().items_center().gap_2()
                     .child(div().text_sm().text_color(p.text).child(format!("Room {}", info.id)))
-                    .child(div().text_xs().text_color(p.text2).child(role)))
+                    .child(div().text_xs().text_color(p.text2).child(format!("{role} · {} in room", snap.members.len().max(1)))))
                 .child(div().flex().items_center().gap_2()
-                    .child(button("room-open-lobby", "Open room", p, true).on_click(cx.listener(|_, _, _, cx| {
-                        crate::ui::app::open_room(cx);
+                    .child(button("room-open-lobby", "Open room", p, true).on_click(cx.listener(|_, _, w, cx| {
+                        crate::ui::app::open_room(w, cx);
                     })))
-                    .child(button("room-leave", "Leave room", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                        crate::ui::app::close_room(cx);
+                    .child(button("room-leave", "Leave room", p, false).on_click(cx.listener(|_, _, w, cx| {
+                        crate::ui::app::close_room(w, cx);
                         cx.notify();
                     }))));
         } else {
             room_card = room_card.child(
                 div().flex().items_center().gap_3()
-                    .child(button("room-create", "Create room", p, true).on_click(cx.listener(|_, _, _w, cx| {
-                        room::create_room(cx);
+                    .child(button("room-create", "Create room", p, true).on_click(cx.listener(|_, _, w, cx| {
+                        room::create_room(w, cx);
                         cx.notify();
                     })))
                     .child(div().text_sm().text_color(p.text2).child("Then invite a friend.")),
@@ -312,8 +300,8 @@ impl Render for SocialPage {
             room_card = room_card.child(
                 div().flex().items_center().gap_3().pt_2()
                     .child(div().text_sm().text_color(p.text).child(format!("{} invited you", inv.name)))
-                    .child(button("room-accept", "Join", p, true).on_click(cx.listener(|_, _, _w, cx| {
-                        room::accept_invite(cx);
+                    .child(button("room-accept", "Join", p, true).on_click(cx.listener(|_, _, w, cx| {
+                        room::accept_invite(w, cx);
                         cx.notify();
                     })))
                     .child(button("room-decline", "Later", p, false).on_click(cx.listener(|_, _, _w, cx| {
@@ -339,34 +327,37 @@ impl Render for SocialPage {
                     .child(dot(true, p))
                     .child(div().flex_1().min_w_0().text_sm().text_color(p.text).truncate().child(format!("{}'s room", r.host_name)))
                     .child(button(SharedString::from(format!("social-join-{}", r.host)), "Join", p, true).on_click(
-                        cx.listener(move |_, _, _w, cx| {
-                            room::join_room(cx, room_id.clone(), host.clone());
+                        cx.listener(move |_, _, w, cx| {
+                            room::join_room(w, cx, room_id.clone(), host.clone());
                             cx.notify();
                         }),
                     )),
             );
         }
 
-        // ── home: share the current video ──
-        let share_card = crate::room::current_video(cx).map(|v| {
-            let title = if v.title.is_empty() { v.id.clone() } else { v.title.clone() };
-            card(p)
-                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Share"))
-                .child(div().text_sm().text_color(p.text2).child(format!("Share “{title}” with your friends.")))
-                .child(button("social-share-now", "Share with friends", p, false).on_click(cx.listener(|_, _, _w, cx| {
-                    if let Some(v) = crate::room::current_video(cx) {
-                        room::share_all(v, cx);
-                    }
-                })))
-        });
-
         // ── home: feeds ──
-        let direct: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.action == "share" && !a.general).take(12).cloned().collect();
-        let general: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.action != "share" || a.general).take(20).cloned().collect();
+        let me = snap.cfg.me.clone();
+        let direct: Vec<room::Activity> = snap
+            .feed
+            .iter()
+            .rev()
+            .filter(|a| a.from_id != me && a.action == "share" && !a.general)
+            .take(12)
+            .cloned()
+            .collect();
+        let general: Vec<room::Activity> = snap
+            .feed
+            .iter()
+            .rev()
+            .filter(|a| a.from_id != me && (a.action != "share" || a.general))
+            .take(20)
+            .cloned()
+            .collect();
+        let mine: Vec<room::Activity> = snap.feed.iter().rev().filter(|a| a.from_id == me).take(20).cloned().collect();
 
         let mut shared = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Shared with you"));
         if direct.is_empty() {
-            shared = shared.child(div().text_sm().text_color(p.text3).child("Nothing yet. Friends can send you a video from their Social page."));
+            shared = shared.child(div().text_sm().text_color(p.text3).child("Nothing yet. Friends can send you a video from the Share button under any video."));
         } else {
             for a in &direct {
                 shared = shared.child(activity_row(a, p, cx));
@@ -387,42 +378,63 @@ impl Render for SocialPage {
             }
         }
 
+        let mut own = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Your activity"));
+        if mine.is_empty() {
+            own = own.child(div().text_sm().text_color(p.text3).child("Videos you share, like or dislike show here."));
+        } else {
+            for a in &mine {
+                own = own.child(activity_row(a, p, cx));
+            }
+        }
+
         // ── compose ──
         let mut content = div().flex().flex_col().gap_4();
         match self.tab {
             SocialTab::Home => {
-                let mut status_card = card(p)
+                let header = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child("Social"))
+                            .child(div().text_xs().text_color(p.text2).child(if connected {
+                                format!("{} as {}", snap.cfg.relay, snap.cfg.name)
+                            } else {
+                                "Not connected. Open Settings to connect.".to_string()
+                            })),
+                    )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Social"))
-                                    .child(div().text_xs().text_color(p.text2).child(if connected {
-                                        format!("{} as {}", snap.cfg.relay, snap.cfg.name)
-                                    } else {
-                                        "Not connected. Open Settings to connect.".to_string()
-                                    })),
-                            )
-                            .child(div().flex().items_center().gap_2().child(dot(connected, p)).child(div().text_sm().text_color(status_color).child(status.to_string()))),
+                            .gap_3()
+                            .child(dot(connected, p))
+                            .child(div().text_sm().text_color(status_color).child(status.to_string()))
+                            .child(button("social-go-settings", "Settings", p, false).on_click(cx.listener(|this, _, _, cx| {
+                                this.tab = SocialTab::Settings;
+                                cx.notify();
+                            }))),
                     );
-                status_card = status_card.child(div().flex().items_center().gap_2()
-                    .child(button("social-go-settings", "Settings", p, false).on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = SocialTab::Settings;
-                        cx.notify();
-                    })))
-                    .when(in_room, |d| d.child(button("social-go-room", "Open room", p, true).on_click(cx.listener(|_, _, _, cx| {
-                        crate::ui::app::open_room(cx);
-                    })))));
-                content = content.child(status_card).child(room_card).child(rooms);
-                if let Some(share) = share_card {
-                    content = content.child(share);
-                }
-                content = content.child(shared).child(acts);
+                let left = div().flex().flex_col().gap_4().child(room_card).child(rooms).child(own);
+                let right = div().flex().flex_col().gap_4().child(shared).child(acts);
+                let ui = *cx.global::<crate::ui::app::UiState>();
+                let wide = (ui.viewport.width - px(280.)) > px(900.);
+                let feeds: AnyElement = if wide {
+                    div()
+                        .flex()
+                        .gap_4()
+                        .items_start()
+                        .child(div().flex_1().min_w_0().child(left))
+                        .child(div().flex_1().min_w_0().child(right))
+                        .into_any_element()
+                } else {
+                    div().flex().flex_col().gap_4().child(left).child(right).into_any_element()
+                };
+                content = content.child(header).child(feeds);
             }
             SocialTab::Settings => {
                 content = content.child(conn).child(friends);
@@ -445,7 +457,7 @@ impl Render for SocialPage {
             .when(in_room, |d| {
                 d.child(
                     tab_pill("social-tab-room", "Room", false, true, p)
-                        .on_click(cx.listener(|_, _, _, cx| crate::ui::app::open_room(cx))),
+                        .on_click(cx.listener(|_, _, w, cx| crate::ui::app::open_room(w, cx))),
                 )
             })
             .when(!in_room, |d| d.child(tab_pill("social-tab-room", "Room", false, false, p)))
@@ -472,7 +484,7 @@ impl Render for SocialPage {
                             .gap_4()
                             .p_6()
                             .w_full()
-                            .max_w(px(760.))
+                            .max_w(px(1180.))
                             .child(bar)
                             .child(content),
                     ),

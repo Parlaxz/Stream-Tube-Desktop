@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.11.7
+
+### Tabs
+
+- The tab overview grid layout is three icon buttons (Dynamic, 4 columns, 6 columns), right-aligned with the sort control.
+- The sort control shows a sort icon and its name. Clicking it again flips between ascending and descending, and the chosen sort also orders the group pills.
+- Tab cards always show views, upload time and length.
+- Dragging a tab over a group only highlights it; the group expands on a click, not on drag.
+- Closing the active tab returns to Home instead of opening a neighbour, which could expand a closed group and start its video.
+- The tab that is playing has an accent-tinted background, an accent outline and a headphones icon in the rail and the tab grid.
+
+### Player
+
+- Settings → Tweaks has a **Player buttons** card that can hide the captions, screenshot, PiP and mini player, speed controls, theater mode, windowed fullscreen and fullscreen buttons in the player control bar.
+
+### Rooms and social
+
+- The room tab is a full video page: shared player, queue and room settings, with the normal video-page layout. The sidebar becomes a drawer, and theater and fullscreen both fill the window.
+- Creating, joining, opening and leaving a room now switch tabs reliably. These buttons could silently do nothing because they updated the window from inside its own event.
+- Drag a queue row to reorder it. The row menu also has **Play now**, **Play next**, **Move to top** and **Remove**, and **Paste** fills the add box from the clipboard.
+- Rooms show who is in them, with **You · Host**, **Host** and **Guest** roles. Guests announce themselves and are dropped after 12 seconds of silence or when they leave.
+- Emoji reactions and **Party**, **LOL** and **Wow** GIF-style bursts float over the room video. The host fans them out to every guest.
+- Social is a wider two-column page with one Room card. The big Share card is gone: sharing lives under any video's **Share** button (copy link, share with friends, or send to a saved friend). The friends list no longer has a separate Send button.
+- **Your activity** shows the videos you shared, liked or disliked, next to Shared with you and Friends' activity.
+
+### Fixed
+
+- The room tab could panic while opening, which blocked it and some room buttons.
+- The fullscreen, theater and windowed-fullscreen buttons now work on the room tab; the room route was not treated as a video page.
+
 ## 0.11.6
 
 ### Fixed

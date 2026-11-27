@@ -216,6 +216,23 @@ impl PlayerView {
             cx.notify();
         }
     }
+
+    /// Mouse buttons 4 (back) and 5 (forward) seek like the Left/Right keys.
+    /// Only the main player takes them; the mini player leaves app back/forward.
+    fn seek_with_back_forward(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.mini || self.pip || self.player.read(cx).video.is_none() {
+            return;
+        }
+        cx.stop_propagation();
+        let step = store::settings_snapshot().seek_step;
+        self.player.update(cx, |pl, cx| {
+            let before = pl.time;
+            pl.seek_by(if forward { step } else { -step });
+            pl.show_keyboard_feedback(KeyboardFeedback::Seek(pl.time - before), cx);
+            cx.notify();
+        });
+        self.poke(cx);
+    }
 }
 
 /// Hides the mouse pointer until it moves again. GPUI has no public call for
@@ -493,6 +510,14 @@ impl Render for PlayerView {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| this.finish_drag(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.seek_with_back_forward(false, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.seek_with_back_forward(true, cx)),
             )
             .child(volume_layer)
             .child(surface);
@@ -1502,9 +1527,9 @@ impl PlayerView {
                         })),
                 )
             })
-            .child(speed_group)
-            .when(has_captions, |d| d.child(div().w(px(1.)).h_5().mx_1().bg(hsla(0., 0., 1., 0.25))))
-            .when(has_captions, |d| {
+            .when(st.show_speed_buttons, |d| d.child(speed_group))
+            .when(has_captions && st.show_captions_button, |d| d.child(div().w(px(1.)).h_5().mx_1().bg(hsla(0., 0., 1., 0.25))))
+            .when(has_captions && st.show_captions_button, |d| {
                 d.child(
                     ctl_btn("c-cc", if caption_on { "captions" } else { "captions-off" }).on_click(cx.listener(|this, _, _, cx| {
                         let caption = this.player.read(cx).caption;
@@ -1517,7 +1542,7 @@ impl PlayerView {
                     })),
                 )
             })
-            .when(!narrow && !self.player.read(cx).audio_only, |d| {
+            .when(!narrow && !self.player.read(cx).audio_only && st.show_screenshot_button, |d| {
                 d.child(ctl_btn("c-shot", "camera").on_click(cx.listener(|this, _, _, cx| {
                     this.player.update(cx, |p, cx| p.screenshot(cx));
                     this.poke(cx);
@@ -1529,25 +1554,25 @@ impl PlayerView {
                 this.menu = if this.menu.is_some() || just_closed { None } else { Some(Menu::Main) };
                 cx.notify();
             })))
-            .when(!self.pip && !narrow, |d| {
+            .when(!self.pip && !narrow && st.show_pip_buttons, |d| {
                 d.child(ctl_btn("c-mini", "picture-in-picture-2").on_click(|_, window, cx| {
                     crate::ui::app::go_back_keep_playing(window, cx);
                 }))
             })
-            .when(!self.pip && !narrow, |d| {
+            .when(!self.pip && !narrow && st.show_pip_buttons, |d| {
                 d.child(ctl_btn("c-pip", "picture-in-picture").on_click(|_, _, cx| crate::ui::pip::open(cx)))
             })
-            .when(!ui.fullscreen && !self.pip && !narrow, |d| {
+            .when(!ui.fullscreen && !self.pip && !narrow && st.show_theater_button, |d| {
                 d.child(ctl_btn("c-theater", "rectangle-horizontal").on_click(|_, _, cx| {
                     crate::ui::app::toggle_theater_mode(cx);
                 }))
             })
-            .when(!self.pip && !narrow, |d| {
+            .when(!self.pip && !narrow && st.show_windowed_fullscreen_button, |d| {
                 d.child(ctl_btn("c-wfs", if ui.windowed { "shrink" } else { "expand" }).on_click(|_, window, cx| {
                     crate::ui::app::toggle_windowed_fullscreen(window, cx);
                 }))
             })
-            .when(!self.pip, |d| {
+            .when(!self.pip && st.show_fullscreen_button, |d| {
                 d.child(ctl_btn("c-fs", if ui.fullscreen { "minimize" } else { "maximize" }).on_click(|_, window, cx| {
                     crate::ui::app::toggle_fullscreen(window, cx);
                 }))
