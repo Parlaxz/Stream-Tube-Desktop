@@ -19,9 +19,10 @@ pub struct Settings {
     /// ReVanced branding icon key for the window, taskbar and in-app logo ("" = accent logo).
     pub app_icon: String,
     pub start_page: String,
-    /// "pin" (top-bar pin decides) | "auto" (kept until a manual refresh or app
-    /// start) | "off": how the home feed survives a reload.
+    /// "auto": kept across restarts until Refresh | "off": fetch on each visit.
     pub home_preserve: String,
+    /// "native": browser Home in YouTube order | "shuffled": local mixing and fallbacks.
+    pub home_recommendations: String,
     pub grid_columns: u32,
     // Region
     pub region: String,
@@ -201,7 +202,8 @@ impl Default for Settings {
             accent: 0xff0033,
             app_icon: String::new(),
             start_page: "home".into(),
-            home_preserve: "pin".into(),
+            home_preserve: "auto".into(),
+            home_recommendations: "shuffled".into(),
             grid_columns: 0,
             region: "US".into(),
             language: "en".into(),
@@ -610,14 +612,23 @@ fn db() -> &'static Mutex<Connection> {
         // on every 5-second playback progress save.
         conn.execute_batch(&format!("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; {TABLES}"))
         .expect("init db");
-        // built-in playlists
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM playlists WHERE protected=1", [], |r| r.get(0))
-            .unwrap_or(0);
-        if n == 0 {
-            let now = crate::api::json::now();
-            let _ = conn.execute("INSERT INTO playlists(name, created_at, protected) VALUES ('Watch later', ?1, 1)", [now]);
-            let _ = conn.execute("INSERT INTO playlists(name, created_at, protected) VALUES ('Favorites', ?1, 1)", [now + 1]);
+        // Older builds seeded "Watch later" and "Favorites" playlists. Stop
+        // seeding them: the sidebar now lists the account's own playlists. Keep
+        // any locally saved videos as normal playlists instead of losing them.
+        let builtins: Vec<(i64, String, i64)> = conn
+            .prepare("SELECT id, name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id=p.id) FROM playlists p WHERE protected=1")
+            .and_then(|mut s| {
+                s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            })
+            .unwrap_or_default();
+        for (id, name, items) in builtins {
+            if items == 0 {
+                let _ = conn.execute("DELETE FROM playlists WHERE id=?1", [id]);
+                let _ = conn.execute("DELETE FROM playlist_items WHERE playlist_id=?1", [id]);
+            } else {
+                let _ = conn.execute("UPDATE playlists SET protected=0, name=?2 WHERE id=?1", params![id, format!("{name} (saved)")]);
+            }
         }
         Mutex::new(conn)
     })
@@ -979,6 +990,14 @@ pub fn playlist_rename(id: i64, name: &str) {
     let _ = db().lock().execute("UPDATE playlists SET name=?2 WHERE id=?1", params![id, name]);
 }
 
+/// The local "Watch later" playlist used when not signed in, created on first use.
+pub fn local_watch_later() -> i64 {
+    if let Some(p) = playlists().into_iter().find(|p| p.name == "Watch later") {
+        return p.id;
+    }
+    playlist_create("Watch later")
+}
+
 pub fn playlist_delete(id: i64) {
     let conn = db().lock();
     let _ = conn.execute("DELETE FROM playlists WHERE id=?1 AND protected=0", [id]);
@@ -1201,6 +1220,21 @@ pub fn set_rating(video_id: &str, r: i8) {
 #[cfg(test)]
 mod settings_tests {
     use super::*;
+
+    #[test]
+    fn home_activity_settings_keep_existing_recommendations_and_round_trip() {
+        let old = settings_from_value(serde_json::json!({}));
+        assert_eq!(old.home_recommendations, "shuffled");
+        assert_eq!(old.home_preserve, "auto");
+        for mode in ["native", "shuffled"] {
+            for preserve in ["auto", "off"] {
+                let settings = Settings { home_recommendations: mode.into(), home_preserve: preserve.into(), ..old.clone() };
+                let restored = settings_from_value(serde_json::to_value(settings).unwrap());
+                assert_eq!(restored.home_recommendations, mode);
+                assert_eq!(restored.home_preserve, preserve);
+            }
+        }
+    }
 
     #[test]
     fn theater_mode_round_trips_and_defaults_to_off() {

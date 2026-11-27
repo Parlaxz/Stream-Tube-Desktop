@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.0
+
+### Social
+
+- Direct messages: send a video to a friend with a start timestamp and a comment, reply in a thread and react with an emoji.
+- The relay stores DMs and replays them on login, so an offline friend still receives them.
+- The top-bar paper plane opens Messages and shows a dot while unread messages wait; the bell now shows the signed-in YouTube account's notifications.
+- The Social page has a Messages tab with threads, video cards at their timestamp and a reply box.
+
+### Playlists
+
+- The seeded "Watch later" and "Favorites" playlists are gone. Saved videos stay as a normal local playlist, and the sidebar shows the account's own Watch later.
+- Saving to Watch later writes to the account playlist when signed in, with a local fallback.
+
+### Home
+
+- Settings → Tweaks offers **Native Home** (your browser sign-in and YouTube's order) and **Shuffled Home**; press Refresh on Home to apply a change.
+- **Keep Home until Refresh** keeps the same videos and order across restarts, and the cache is per account.
+
+### Player
+
+- Mouse button 4 and button 5 seek back and forward in the video player, the same as the Left and Right arrow keys. Hold a button to keep seeking.
+
+### Windows
+
+- Media keys on keyboards and headsets, and the Windows media overlay, control playback, also while the app runs in the background.
+
 ## 0.11.7
 
 ### Tabs
@@ -10,6 +37,8 @@
 - Dragging a tab over a group only highlights it; the group expands on a click, not on drag.
 - Closing the active tab returns to Home instead of opening a neighbour, which could expand a closed group and start its video.
 - The tab that is playing has an accent-tinted background, an accent outline and a headphones icon in the rail and the tab grid.
+- Social and Room are pinned tabs that stay right after Home, before group strips, and do not drag into groups.
+- Social opens once from a new top-bar button beside the bell; the sidebar no longer lists it, and clicking it again reuses the open tab.
 
 ### Player
 

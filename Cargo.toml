@@ -40,7 +40,7 @@ objc2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # already in the tree through GPUI's Windows backend
-windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Media", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = { version = "0.31", features = ["system", "dlopen"] }

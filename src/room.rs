@@ -94,6 +94,17 @@ pub struct Sync {
     /// Unix seconds, for ordering the feed.
     #[serde(default)]
     pub at: u64,
+    /// Direct message: the recipient and the message body.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// Stable id of a DM, so a replayed message is stored once.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dm_id: String,
+    /// Set on a reaction: the DM it reacts to.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub react_to: String,
 }
 
 fn one() -> f64 {
@@ -109,6 +120,29 @@ pub struct Activity {
     pub video: Option<VideoItem>,
     pub general: bool,
     pub at: u64,
+}
+
+/// A direct message or an emoji reaction to one.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Dm {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub video: Option<VideoItem>,
+    #[serde(default)]
+    pub pos: f64,
+    #[serde(default)]
+    pub at: u64,
+    /// The DM this reacts to, empty for a normal message.
+    #[serde(default)]
+    pub react_to: String,
+    #[serde(default)]
+    pub emoji: String,
 }
 
 /// A room a friend currently hosts, advertised so others can join uninvited.
@@ -167,6 +201,8 @@ struct Inner {
     here: Instant,
     reactions: Vec<Reaction>,
     next_reaction: u64,
+    /// Cached DMs, both sent and received. The relay replays the rest on login.
+    dms: Vec<Dm>,
 }
 
 impl Inner {
@@ -204,6 +240,7 @@ impl Inner {
             here: Instant::now(),
             reactions: Vec::new(),
             next_reaction: 0,
+            dms: store::kv_get("dms").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         }
     }
 }
@@ -246,6 +283,7 @@ pub struct Snapshot {
     /// Who hosts (a name, not an id).
     pub host_name: String,
     pub reactions: Vec<Reaction>,
+    pub dms: Vec<Dm>,
 }
 
 pub fn snapshot(cx: &mut App) -> Snapshot {
@@ -267,6 +305,7 @@ pub fn snapshot(cx: &mut App) -> Snapshot {
         members: roster(&g),
         host_name: host_name(&g),
         reactions: g.reactions.clone(),
+        dms: g.dms.clone(),
     }
 }
 
@@ -813,6 +852,167 @@ pub fn share_to(friend_id: String, video: VideoItem, cx: &mut App) {
     }
 }
 
+/// Sends a direct message: a text comment, optionally with a video and a
+/// timestamp to start at. The relay stores it for an offline friend.
+pub fn send_dm(to: String, text: String, video: Option<VideoItem>, pos: f64, cx: &mut App) {
+    if to.is_empty() {
+        toast(cx, "Add a friend first");
+        return;
+    }
+    let sent = {
+        let r = cx.default_global::<Room>();
+        let mut g = r.inner.lock().unwrap();
+        if g.out.is_none() {
+            false
+        } else {
+            let id = new_id();
+            let at = now_secs();
+            let msg = Sync {
+                kind: "dm".into(),
+                to: to.clone(),
+                name: g.cfg.name.clone(),
+                text: text.clone(),
+                video: video.clone(),
+                pos,
+                at,
+                dm_id: id.clone(),
+                speed: 1.0,
+                ..Default::default()
+            };
+            match serde_json::to_string(&msg) {
+                Ok(j) => {
+                    send_now(&g, &format!("DM {to} {j}"));
+                    let dm = Dm {
+                        id,
+                        from: g.cfg.me.clone(),
+                        to,
+                        name: g.cfg.name.clone(),
+                        text,
+                        video,
+                        pos,
+                        at,
+                        ..Default::default()
+                    };
+                    upsert_dm(&mut g, dm);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    };
+    if sent {
+        toast(cx, "Sent");
+    } else {
+        toast(cx, "Connect to the relay first");
+    }
+    cx.refresh_windows();
+}
+
+/// Sends an emoji reaction to a DM. The contact is the other side of that thread.
+pub fn react_dm(target: String, emoji: String, cx: &mut App) {
+    let found = {
+        let r = cx.default_global::<Room>();
+        let g = r.inner.lock().unwrap();
+        g.dms.iter().find(|d| d.id == target && d.react_to.is_empty()).cloned()
+    };
+    let Some(dm) = found else {
+        return;
+    };
+    let contact = if dm.from == snapshot_me(cx) { dm.to.clone() } else { dm.from.clone() };
+    if contact.is_empty() {
+        return;
+    }
+    let ok = {
+        let r = cx.default_global::<Room>();
+        let mut g = r.inner.lock().unwrap();
+        if g.out.is_none() {
+            false
+        } else {
+            let id = new_id();
+            let at = now_secs();
+            let msg = Sync {
+                kind: "dm_react".into(),
+                to: contact.clone(),
+                name: g.cfg.name.clone(),
+                dm_id: id.clone(),
+                react_to: target.clone(),
+                action: emoji.clone(),
+                at,
+                speed: 1.0,
+                ..Default::default()
+            };
+            match serde_json::to_string(&msg) {
+                Ok(j) => {
+                    send_now(&g, &format!("DM {contact} {j}"));
+                    let react = Dm {
+                        id,
+                        from: g.cfg.me.clone(),
+                        to: contact,
+                        name: g.cfg.name.clone(),
+                        at,
+                        react_to: target,
+                        emoji,
+                        ..Default::default()
+                    };
+                    upsert_dm(&mut g, react);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    };
+    if !ok {
+        toast(cx, "Connect to the relay first");
+    }
+    cx.refresh_windows();
+}
+
+fn snapshot_me(cx: &mut App) -> String {
+    let r = cx.default_global::<Room>();
+    r.inner.lock().unwrap().cfg.me.clone()
+}
+
+fn save_dms(g: &Inner) {
+    if let Ok(s) = serde_json::to_string(&g.dms) {
+        store::kv_set("dms", &s);
+    }
+}
+
+fn upsert_dm(g: &mut Inner, dm: Dm) {
+    match g.dms.iter_mut().find(|d| d.id == dm.id) {
+        Some(existing) => *existing = dm,
+        None => g.dms.push(dm),
+    }
+    g.dms.sort_by_key(|d| d.at);
+    if g.dms.len() > 500 {
+        g.dms.drain(0..g.dms.len() - 500);
+    }
+    save_dms(g);
+}
+
+/// The messages between `me` and `friend`, oldest first.
+pub fn conversation<'a>(dms: &'a [Dm], me: &str, friend: &str) -> Vec<&'a Dm> {
+    dms.iter()
+        .filter(|d| (d.from == friend && d.to == me) || (d.from == me && d.to == friend))
+        .collect()
+}
+
+/// DMs from friends that arrived after the last time the inbox was opened.
+pub fn unread_dms(cx: &App) -> u32 {
+    let Some(r) = cx.try_global::<Room>() else { return 0 };
+    let g = r.inner.lock().unwrap();
+    let seen: u64 = store::kv_get("dms_seen").and_then(|s| s.parse().ok()).unwrap_or(0);
+    g.dms
+        .iter()
+        .filter(|d| d.from != g.cfg.me && d.react_to.is_empty() && d.at > seen)
+        .count() as u32
+}
+
+pub fn mark_dms_read(cx: &mut App) {
+    store::kv_set("dms_seen", &now_secs().to_string());
+    cx.refresh_windows();
+}
+
 /// Sends a like/dislike to friends when the matching sharing setting is on.
 /// The action is recorded locally either way, so Social can show your activity.
 pub fn activity(action: &str, video: VideoItem, cx: &mut App) {
@@ -1137,6 +1337,51 @@ fn on_message(cx: &mut App, from: &str, msg: Sync) {
                     g.feed.remove(0);
                 }
             }
+            cx.refresh_windows();
+        }
+        "dm" => {
+            let name = if msg.name.trim().is_empty() { from.chars().take(8).collect::<String>() } else { msg.name.clone() };
+            let id = if msg.dm_id.is_empty() { format!("{from}-{}", msg.at) } else { msg.dm_id.clone() };
+            let dm = Dm {
+                id,
+                from: from.to_string(),
+                to: msg.to.clone(),
+                name: name.clone(),
+                text: msg.text.clone(),
+                video: msg.video.clone(),
+                pos: msg.pos,
+                at: msg.at,
+                ..Default::default()
+            };
+            let direct = {
+                let r = cx.default_global::<Room>();
+                let mut g = r.inner.lock().unwrap();
+                let direct = dm.from != g.cfg.me;
+                upsert_dm(&mut g, dm);
+                direct
+            };
+            if direct && msg.video.is_some() {
+                toast(cx, format!("{name} sent you a video"));
+            }
+            cx.refresh_windows();
+        }
+        "dm_react" => {
+            let name = if msg.name.trim().is_empty() { from.chars().take(8).collect::<String>() } else { msg.name.clone() };
+            let id = if msg.dm_id.is_empty() { format!("react-{from}-{}", msg.at) } else { msg.dm_id.clone() };
+            let react = Dm {
+                id,
+                from: from.to_string(),
+                to: msg.to.clone(),
+                name,
+                at: msg.at,
+                react_to: msg.react_to.clone(),
+                emoji: msg.action.clone(),
+                ..Default::default()
+            };
+            let r = cx.default_global::<Room>();
+            let mut g = r.inner.lock().unwrap();
+            upsert_dm(&mut g, react);
+            drop(g);
             cx.refresh_windows();
         }
         "room" => {

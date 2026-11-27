@@ -69,8 +69,6 @@ pub struct UiState {
     /// fullscreen layout inside the window, without OS fullscreen
     pub windowed: bool,
     pub sidebar_open: bool,
-    /// Keep the home feed through reloads instead of replacing it (topbar pin).
-    pub preserve_home: bool,
     pub content_width: Pixels,
     pub viewport: Size<Pixels>,
 }
@@ -412,9 +410,49 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
     app.update(cx, |a, cx| a.open_settings_tab(window, cx));
 }
 
-/// Opens the Social page (friends, rooms, activity).
+/// Opens the Social page in a single pinned tab, like Home.
 pub fn open_social(window: &mut Window, cx: &mut App) {
-    navigate(Route::Social, window, cx);
+    let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
+    app.update(cx, |a, cx| a.open_social_tab(window, cx));
+}
+
+/// Opens the Social page on its Messages tab (the paper-plane button).
+pub fn open_social_inbox(window: &mut Window, cx: &mut App) {
+    crate::ui::pages::social::request_dms();
+    let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
+    app.update(cx, |a, cx| {
+        a.open_social_tab(window, cx);
+        if matches!(&a.route, Route::Social) {
+            // Rebuild even when the page was already open so it lands on Messages.
+            crate::ui::pages::social::request_dms();
+            crate::ui::slot::clear_slot(cx);
+            a.page = build_page(&Route::Social, window, cx);
+            cx.notify();
+        }
+    });
+}
+
+/// Saves a video to the account's Watch later. Falls back to a local playlist
+/// when there is no account playlist to write to.
+pub fn save_to_watch_later(video: VideoItem, cx: &mut App) {
+    if crate::api::auth::signed_in() {
+        let vid = video.id.clone();
+        cx.spawn(async move |cx| {
+            let res = blocking(move || crate::api::auth::playlist_add("WL", &vid)).await;
+            let _ = cx.update(|cx| {
+                if let Err(e) = res {
+                    store::playlist_add(store::local_watch_later(), &video);
+                    crate::ui::toast(cx, format!("Saved locally: {e}"));
+                } else {
+                    crate::ui::toast(cx, "Saved to Watch later");
+                }
+            });
+        })
+        .detach();
+    } else {
+        store::playlist_add(store::local_watch_later(), &video);
+        crate::ui::toast(cx, "Saved to Watch later");
+    }
 }
 
 pub fn is_current_page(page: EntityId, cx: &App) -> bool {
@@ -471,6 +509,11 @@ pub struct OpenMenu(pub Option<(Point<Pixels>, MenuContent)>);
 impl Global for OpenMenu {}
 
 pub fn open_menu(pos: Point<Pixels>, items: Vec<MenuItem>, _window: &mut Window, cx: &mut App) {
+    open_menu_at(pos, items, cx);
+}
+
+/// Opens a menu without a window handle, for async click handlers.
+pub fn open_menu_at(pos: Point<Pixels>, items: Vec<MenuItem>, cx: &mut App) {
     cx.set_global(OpenMenu(Some((pos, MenuContent::Items(items)))));
     cx.refresh_windows();
 }
@@ -485,6 +528,8 @@ pub enum Dialog {
         membership: Option<std::collections::HashSet<String>>,
     },
     TextPrompt { title: String, placeholder: String, on_submit: Arc<dyn Fn(String, &mut Window, &mut App)> },
+    /// send a video to one friend with a start timestamp and a comment
+    SendVideo { video: VideoItem, friend_id: String, friend_name: String, at_secs: f64 },
     Confirm { title: String, body: String, confirm: String, on_confirm: Arc<dyn Fn(&mut Window, &mut App)> },
     /// a newer version is on GitHub
     Update,
@@ -665,6 +710,42 @@ pub fn confirm(title: &str, body: &str, confirm: &str, window: &mut Window, cx: 
     );
 }
 
+/// Opens the "send a video" dialog with a start timestamp and a comment.
+pub fn open_send_video(video: VideoItem, friend_id: String, friend_name: String, at_secs: f64, window: &mut Window, cx: &mut App) {
+    let Some(app) = cx.try_global::<AppHandle>().and_then(|h| h.0.upgrade()) else { return };
+    app.update(cx, |a, cx| {
+        let s = at_secs.max(0.0) as u64;
+        let stamp = format!("{}:{:02}", s / 60, s % 60);
+        a.dialog_input.update(cx, |i, cx| {
+            i.set_value(stamp, window, cx);
+            i.set_placeholder(SharedString::from("0:00"), window, cx);
+        });
+        a.dialog_input2.update(cx, |i, cx| {
+            i.set_value("", window, cx);
+            i.set_placeholder(SharedString::from("Add a comment"), window, cx);
+        });
+        let fh = a.dialog_input2.read(cx).focus_handle(cx);
+        window.focus(&fh, cx);
+        a.dialog = Some(Dialog::SendVideo { video, friend_id, friend_name, at_secs });
+        cx.notify();
+    });
+}
+
+/// Accepts `90`, `1:30` or `1:02:03`.
+fn parse_stamp(s: &str) -> Option<f64> {
+    let mut total = 0.0;
+    let mut parts = 0;
+    for p in s.trim().split(':') {
+        let v: f64 = p.trim().parse().ok()?;
+        total = total * 60.0 + v;
+        parts += 1;
+        if parts > 3 {
+            return None;
+        }
+    }
+    (parts > 0).then_some(total)
+}
+
 // ───────────────────────── AppView ─────────────────────────
 
 /// A tab that isn't the one shown. The shown tab lives in AppView's own
@@ -840,6 +921,7 @@ pub struct AppView {
     /// the signed-in account's playlists for the Save dialog (None while loading)
     yt_playlists: Option<Vec<crate::api::types::PlaylistItem>>,
     dialog_input: Entity<InputState>,
+    dialog_input2: Entity<InputState>,
     focus: FocusHandle,
     pending_watch_sync: Option<String>,
     login: LoginFlow,
@@ -884,15 +966,16 @@ pub struct AppView {
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::idle_inhibit::set_main_window(cx, window);
+        crate::media_session::init(window, cx);
         cx.set_global(AppHandle(cx.entity().downgrade()));
-        let preserve_home = store::kv_get("preserve_home").as_deref() == Some("1");
-        cx.set_global(UiState { sidebar_open: true, preserve_home, ..Default::default() });
+        cx.set_global(UiState { sidebar_open: true, ..Default::default() });
         cx.set_global(OpenMenu::default());
         crate::downloads::load_history(cx);
         cx.set_global(AutoplayNext::default());
         cx.set_global(crate::ui::cards::Watched(store::progress_map()));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t("Search or paste a YouTube link")));
         let dialog_input = cx.new(|cx| InputState::new(window, cx));
+        let dialog_input2 = cx.new(|cx| InputState::new(window, cx));
         let group_name = cx.new(|cx| InputState::new(window, cx));
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(&search, window, |this: &mut Self, state, ev: &InputEvent, window, cx| match ev {
@@ -1161,6 +1244,7 @@ impl AppView {
             dialog: None,
             yt_playlists: None,
             dialog_input,
+            dialog_input2,
             group_name,
             groups,
             next_group_id,
@@ -1679,6 +1763,22 @@ impl AppView {
         }
     }
 
+    /// Shows the single Social tab, opening it pinned after Home if needed.
+    fn open_social_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.route, Route::Social) {
+            return;
+        }
+        let existing = (0..self.tabs.len()).find(|&i| {
+            let route = if i == self.active_tab { &self.route } else { &self.tabs[i].route };
+            matches!(route, Route::Social)
+        });
+        if let Some(i) = existing {
+            self.switch_tab(i, window, cx);
+        } else {
+            self.new_tab(Route::Social, None, None, true, window, cx);
+        }
+    }
+
     /// Sidebar navigation: Ctrl/Cmd+left click or a middle click opens the
     /// target in a new tab, any other click navigates in place.
     fn nav(&mut self, route: Route, ev: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1723,8 +1823,9 @@ impl AppView {
         self.next_tab_id += 1;
         let player = crate::player::controller::create(cx);
         // right after the current tab, like a browser
-        // a room tab always sits right after the pinned Home tab
-        let at = if matches!(&route, Route::Room) { 1.min(self.tabs.len()) } else { self.active_tab + 1 };
+        // a room or social tab always sits right after the pinned Home tab,
+        // before group strips and ordinary tabs
+        let at = if matches!(&route, Route::Room | Route::Social) { 1.min(self.tabs.len()) } else { self.active_tab + 1 };
         self.tabs.insert(at, Tab { id, route, title, channel, page: None, history: Vec::new(), forward: Vec::new(), player, group: None });
         // inserting before the active tab shifts its slot; keep pointing at it
         if at <= self.active_tab {
@@ -1976,6 +2077,9 @@ impl AppView {
             // the pinned Home tab is an icon only: no label, no close, no drag
             let pinned = i == 0;
             let route = if active { self.route.clone() } else { self.tabs[i].route.clone() };
+            // Social and Room are pinned before the group strips, so they never
+            // drag into a group or render inside one.
+            let pinned_section = pinned || matches!(route, Route::Social | Route::Room);
             let id = self.tabs[i].id;
             let label = Self::tab_label(&route, if active { None } else { self.tabs[i].title.as_deref() }, &self.tabs[i].player, cx);
             let thumb = {
@@ -2022,7 +2126,7 @@ impl AppView {
                         }
                     }),
                 )
-                .when(!pinned, |d| {
+                .when(!pinned_section, |d| {
                     d.on_drag(TabDrag { id, label: label.clone().into(), icon: Self::tab_icon(&route) }, |d: &TabDrag, offset, _, cx| {
                         cx.new(move |_| TabDragView { label: d.label.clone(), icon: d.icon, offset })
                     })
@@ -2087,11 +2191,19 @@ impl AppView {
             }
             rail_tabs[i] = Some(tab.into_any_element());
         }
-        // Home first, then each group as a bordered collapsible strip, then
-        // the ungrouped tabs.
+        // Home first, then the pinned Social/Room tabs, then each group as a
+        // bordered collapsible strip, then the ungrouped tabs.
         let mut rail = tabs;
         if let Some(home) = rail_tabs.get_mut(0).and_then(|x| x.take()) {
             rail = rail.child(home);
+        }
+        for i in 1..self.tabs.len() {
+            let route = if i == self.active_tab { &self.route } else { &self.tabs[i].route };
+            if matches!(route, Route::Social | Route::Room) {
+                if let Some(el) = rail_tabs.get_mut(i).and_then(|x| x.take()) {
+                    rail = rail.child(el);
+                }
+            }
         }
         for g in self.groups.clone() {
             let Some(pill) = group_pills.remove(&g.id) else { continue };
@@ -2104,7 +2216,8 @@ impl AppView {
             }).child(pill);
             if !g.collapsed {
                 for i in 1..self.tabs.len() {
-                    if self.tabs[i].group == Some(g.id) {
+                    let route = if i == self.active_tab { &self.route } else { &self.tabs[i].route };
+                    if self.tabs[i].group == Some(g.id) && !matches!(route, Route::Social | Route::Room) {
                         if let Some(el) = rail_tabs.get_mut(i).and_then(|x| x.take()) {
                             strip = strip.child(el);
                         }
@@ -2118,7 +2231,8 @@ impl AppView {
             ));
         }
         for i in 1..self.tabs.len() {
-            if self.tabs[i].group.is_none() {
+            let route = if i == self.active_tab { &self.route } else { &self.tabs[i].route };
+            if self.tabs[i].group.is_none() && !matches!(route, Route::Social | Route::Room) {
                 if let Some(el) = rail_tabs.get_mut(i).and_then(|x| x.take()) {
                     rail = rail.child(el);
                 }
@@ -2316,7 +2430,14 @@ impl AppView {
         // display order: optional group filter, then the chosen sort
         let order = {
             let mut order: Vec<usize> = (0..self.tabs.len()).collect();
-            order.retain(|&i| i != 0); // the pinned Home tab is not in the grid
+            order.retain(|&i| {
+                if i == 0 {
+                    return false; // the pinned Home tab is not in the grid
+                }
+                let r = if i == self.active_tab { &self.route } else { &self.tabs[i].route };
+                // pinned Social/Room tabs stay on the rail
+                !matches!(r, Route::Social | Route::Room)
+            });
             if let Some(gid) = self.tab_grid_group {
                 order.retain(|&i| self.tabs[i].group == Some(gid));
             } else {
@@ -3099,9 +3220,10 @@ impl AppView {
     /// Reloads the current page (the watch page keeps the player going).
     pub fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.set_global(OpenMenu(None));
-        if matches!(self.route, Route::Home) && store::settings_snapshot().home_preserve == "auto" {
-            // auto preservation gives way to an explicit reload of the home page
-            crate::ui::pages::home::clear_preserved();
+        if matches!(self.route, Route::Home) {
+            self.page = cx.new(|cx| crate::ui::pages::home::HomePage::new(0, true, window, cx)).into();
+            cx.notify();
+            return;
         }
         if let Route::Watch { id, playlist, .. } = self.route.clone() {
             let t = player(cx).read(cx).time;
@@ -3179,31 +3301,6 @@ impl AppView {
             btn = btn.child(icon("download").text_color(p.text));
         }
         btn.into_any_element()
-    }
-
-    /// Topbar toggle: keep the home feed through reloads, only appending on scroll.
-    fn render_preserve_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let p = pal(cx);
-        let on = cx.global::<UiState>().preserve_home;
-        div()
-            .id("preserve-home")
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .size_10()
-            .rounded_full()
-            .cursor_pointer()
-            .hover(move |s| s.bg(p.hover))
-            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Preserve").build(window, cx))
-            .child(icon("pin").text_color(if on { p.accent } else { p.text }))
-            .on_click(cx.listener(|_, _, _, cx| {
-                let on = !cx.global::<UiState>().preserve_home;
-                cx.global_mut::<UiState>().preserve_home = on;
-                store::kv_set("preserve_home", if on { "1" } else { "0" });
-                cx.refresh_windows();
-            }))
-            .into_any_element()
     }
 
     fn render_dl_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3731,15 +3828,49 @@ impl AppView {
 
     // ───── chrome ─────
 
-    /// Bell: unread direct video shares from friends. Opening it marks them read.
+    /// Bell: the signed-in YouTube account's notifications.
     fn render_notifications(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let unread = crate::room::unread(cx);
-        let icon_name = if unread > 0 { "bell-dot" } else { "bell" };
-        icon_button("bell", icon_name, cx)
-            .on_click(cx.listener(|_, ev: &ClickEvent, window, cx| {
-                crate::room::mark_read(cx);
-                let items = crate::room::notification_items(cx);
-                open_menu(ev.position(), items, window, cx);
+        icon_button("bell", "bell", cx)
+            .on_click(cx.listener(|_, ev: &ClickEvent, _window, cx| {
+                let pos = ev.position();
+                cx.spawn(async move |_this, cx| {
+                    let res = blocking(crate::api::web::notifications).await;
+                    let _ = cx.update(|cx| match res {
+                        Ok(list) if !list.is_empty() => {
+                            let items: Vec<MenuItem> = list
+                                .into_iter()
+                                .map(|n| {
+                                    let label = if n.time.is_empty() { n.title.clone() } else { format!("{} · {}", n.title, n.time) };
+                                    MenuItem::new("bell", label, move |window, cx| {
+                                        if let Some(id) = n.video_id.clone() {
+                                            navigate(Route::Watch { id, playlist: None, start: None }, window, cx);
+                                        } else if let Some(cid) = n.channel_id.clone() {
+                                            navigate(Route::Channel(cid), window, cx);
+                                        }
+                                    })
+                                })
+                                .collect();
+                            open_menu_at(pos, items, cx);
+                        }
+                        Ok(_) => toast(cx, "No notifications"),
+                        Err(e) => toast(cx, format!("Could not load notifications: {e}")),
+                    });
+                })
+                .detach();
+            }))
+            .into_any_element()
+    }
+
+    /// Paper plane: opens the DM inbox, with a dot while unread messages wait.
+    fn render_dms(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let unread = crate::room::unread_dms(cx);
+        let p = pal(cx);
+        icon_button("dms", "send", cx)
+            .relative()
+            .when(unread > 0, |d| d.child(div().absolute().top_1().right_1().size(px(8.)).rounded_full().bg(p.accent)))
+            .on_click(cx.listener(|_, _, window, cx| {
+                crate::room::mark_dms_read(cx);
+                open_social_inbox(window, cx);
             }))
             .into_any_element()
     }
@@ -3751,7 +3882,6 @@ impl AppView {
         let suggestions = if self.show_suggestions { self.all_suggestions() } else { Vec::new() };
         let hist: std::collections::HashSet<String> = self.history_suggestions.iter().cloned().collect();
         let sel = self.sel_suggestion;
-        let preserve_btn = (store::settings_snapshot().home_preserve == "pin").then(|| self.render_preserve_button(cx));
         let maximized = window.is_maximized();
         let bar = div()
             .id("topbar")
@@ -3899,8 +4029,13 @@ impl AppView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .children(preserve_btn)
                     .child(self.render_notifications(cx))
+                    .child(self.render_dms(cx))
+                    .child(
+                        icon_button("social", "users", cx)
+                            .when(matches!(&self.route, Route::Social), |d| d.bg(p.chip))
+                            .on_click(cx.listener(|_, _, window, cx| open_social(window, cx))),
+                    )
                     .child(self.render_dl_button(cx))
                     .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.open_settings_tab(window, cx))))
                     .child(self.account_button(cx))
@@ -3951,7 +4086,6 @@ impl AppView {
                 .child(rail("r-home", "house", "Home", Route::Home, route == Route::Home, cx))
                 .when(!s.hide_shorts, |d| d.child(rail("r-shorts", "zap", "Shorts", Route::Shorts(None), matches!(route, Route::Shorts(_)), cx)))
                 .child(rail("r-subs", "tv", "Subscriptions", Route::Subscriptions(None), matches!(route, Route::Subscriptions(_)), cx))
-                .child(rail("r-social", "users", "Social", Route::Social, route == Route::Social, cx))
                 .child(rail("r-you", "circle-user", "You", Route::Library, route == Route::Library, cx))
                 .child(rail("r-dl", "download", "Downloads", Route::Downloads, route == Route::Downloads, cx))
                 .into_any_element();
@@ -4017,7 +4151,6 @@ impl AppView {
             .child(entry("s-home", "house", "Home", Route::Home, route == Route::Home, cx))
             .when(!s.hide_shorts, |d| d.child(entry("s-shorts", "zap", "Shorts", Route::Shorts(None), matches!(route, Route::Shorts(_)), cx)))
             .child(entry("s-subs", "tv", "Subscriptions", Route::Subscriptions(None), matches!(route, Route::Subscriptions(_)), cx))
-            .child(entry("s-social", "users", "Social", Route::Social, route == Route::Social, cx))
             .child(sep())
             .child(nav_item(
                 heading("You").id("s-you").cursor_pointer().rounded_lg().h(px(38.)).hover(move |s| s.bg(p.hover)).child(icon("chevron-right").size_4().text_color(p.text)),
@@ -4026,16 +4159,6 @@ impl AppView {
             ))
             .child(entry("s-hist", "history", "History", Route::History, route == Route::History, cx))
             .child(entry("s-pl", "list-video", "Playlists", Route::Library, route == Route::Library, cx));
-        for pl in store::playlists().into_iter().filter(|p| p.protected) {
-            let name = if pl.name == "Watch later" { "clock" } else { "thumbs-up" };
-            let active = route == Route::LocalPlaylist(pl.id);
-            let id = pl.id;
-            col = col.child(nav_item(
-                row(SharedString::from(format!("s-lp-{id}")), ic(name, active), pl.name.clone(), active),
-                Route::LocalPlaylist(id),
-                cx,
-            ));
-        }
         col = col.child(entry("s-dl", "download", "Downloads", Route::Downloads, route == Route::Downloads, cx));
 
         let profiles = store::profiles();
@@ -4053,14 +4176,18 @@ impl AppView {
         }
 
         let account = if crate::api::auth::signed_in() { store::account_playlists() } else { Vec::new() };
-        let (pinned, unpinned): (Vec<_>, Vec<_>) = account.into_iter().partition(|c| c.pinned);
+        // The account's own Watch later always shows, even when not pinned.
+        let (pinned, unpinned): (Vec<_>, Vec<_>) = account
+            .into_iter()
+            .partition(|c| c.pinned || c.item.id == "WL" || c.item.title.eq_ignore_ascii_case("watch later"));
         if !pinned.is_empty() || !unpinned.is_empty() {
             col = col.child(sep());
             for cp in pinned {
                 let id = cp.item.id.clone();
                 let active = route == Route::Playlist(id.clone());
+                let is_wl = id == "WL" || cp.item.title.eq_ignore_ascii_case("watch later");
                 col = col.child(nav_item(
-                    row(SharedString::from(format!("s-ytpl-{id}")), ic("pin", active), cp.item.title.clone(), active),
+                    row(SharedString::from(format!("s-ytpl-{id}")), ic(if is_wl { "clock" } else { "pin" }, active), cp.item.title.clone(), active),
                     Route::Playlist(id),
                     cx,
                 ));
@@ -4800,6 +4927,51 @@ impl AppView {
                     ),
                 )
                 .into_any_element(),
+            Dialog::SendVideo { video, friend_id, friend_name, at_secs } => {
+                let v = video.clone();
+                let title = if v.title.is_empty() { v.id.clone() } else { v.title.clone() };
+                let fid = friend_id.clone();
+                let send_video = video.clone();
+                let fallback = *at_secs;
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(format!("Send to {}", friend_name)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(img(SharedString::from(v.thumbnail.clone())).w(px(120.)).h(px(68.)).rounded_md().object_fit(ObjectFit::Cover))
+                            .child(div().flex_1().min_w_0().text_sm().text_color(p.text).line_clamp(2).child(title)),
+                    )
+                    .child(div().text_xs().text_color(p.text2).child("Start at"))
+                    .child(div().border_b_1().border_color(p.text2).pb_1().child(Input::new(&self.dialog_input).appearance(false)))
+                    .child(div().text_xs().text_color(p.text2).child("Comment"))
+                    .child(div().border_b_1().border_color(p.text2).pb_1().child(Input::new(&self.dialog_input2).appearance(false)))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(pill("dlg-cancel", None, "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
+                                this.dialog = None;
+                                cx.notify();
+                            })))
+                            .child(pill("dlg-send-video", None, "Send", cx).bg(p.accent).text_color(white()).on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    let stamp = this.dialog_input.read(cx).value().to_string();
+                                    let pos = parse_stamp(&stamp).unwrap_or(fallback);
+                                    let caption = this.dialog_input2.read(cx).value().trim().to_string();
+                                    this.dialog = None;
+                                    crate::room::send_dm(fid.clone(), caption, Some(send_video.clone()), pos, cx);
+                                    cx.notify();
+                                },
+                            ))),
+                    )
+                    .into_any_element()
+            }
             Dialog::Update => self.render_update(cx),
             Dialog::Confirm { title, body, confirm, .. } => div()
                 .flex()
@@ -5260,7 +5432,7 @@ fn window_controls(maximized: bool, cx: &App) -> impl IntoElement {
 
 fn build_page(route: &Route, window: &mut Window, cx: &mut App) -> AnyView {
     match route {
-        Route::Home => cx.new(|cx| home::HomePage::new(0, window, cx)).into(),
+        Route::Home => cx.new(|cx| home::HomePage::new(0, false, window, cx)).into(),
         Route::Shorts(id) => cx.new(|cx| shorts::ShortsPage::new(id.clone(), window, cx)).into(),
         Route::Subscriptions(profile) => cx.new(|cx| subscriptions::FeedPage::new(*profile, window, cx)).into(),
         Route::Channels => cx.new(|cx| subscriptions::ChannelsPage::new(window, cx)).into(),

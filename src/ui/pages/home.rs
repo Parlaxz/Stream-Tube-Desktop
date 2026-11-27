@@ -14,16 +14,6 @@ const WEB: &str = "web:";
 /// actually shows something new (YouTube returns much the same first page).
 static LAST_TOP: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
 
-/// The last home feed while preserve mode is on. The page is rebuilt on refresh
-/// or re-navigation, so the feed lives here instead of only inside the view.
-static PRESERVED: parking_lot::Mutex<Option<Vec<Item>>> = parking_lot::Mutex::new(None);
-
-/// Drops the preserved feed, so the next load fetches a fresh one (a manual
-/// refresh in the auto mode).
-pub fn clear_preserved() {
-    *PRESERVED.lock() = None;
-}
-
 fn item_id(i: &Item) -> Option<String> {
     match i {
         Item::Video(v) => Some(v.id.clone()),
@@ -54,35 +44,35 @@ fn freshen(items: Vec<Item>) -> Vec<Item> {
     fresh
 }
 
-/// Where the home feed comes from, so a cached feed is only shown for the same source.
-fn feed_source() -> &'static str {
+/// Account changes invalidate the snapshot; recommendation settings apply only on Refresh.
+fn feed_source() -> String {
     if crate::api::web::connected() {
-        "web"
+        format!("web:{}", crate::api::web::account_name().unwrap_or_default())
     } else if crate::api::auth::signed_in() {
-        "account"
+        format!("account:{}", crate::api::auth::account().map(|a| a.handle.unwrap_or(a.name)).unwrap_or_default())
     } else {
-        "local"
+        "local".into()
     }
 }
 
-/// The home feed from the last session, shown at once when the app starts while
-/// the new one loads. Kept for three days.
-fn cached_home() -> Option<Vec<Item>> {
-    let v: serde_json::Value = serde_json::from_str(&store::kv_get("home_cache")?).ok()?;
-    if v.get("source")?.as_str()? != feed_source() || crate::api::json::now() - v.get("at")?.as_i64()? > 3 * 24 * 3600 {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedHome {
+    source: String,
+    items: Vec<Item>,
+    continuation: Option<String>,
+}
+
+fn restore_home(raw: Option<&str>, source: &str, preserve: bool, refresh: bool) -> Option<SavedHome> {
+    if !preserve || refresh {
         return None;
     }
-    let items: Vec<Item> = serde_json::from_value(v.get("items")?.clone()).ok()?;
-    (!items.is_empty()).then_some(items)
+    let saved: SavedHome = serde_json::from_str(raw?).ok()?;
+    (saved.source == source).then_some(saved)
 }
 
-fn save_home(items: &[Item]) {
-    let v = serde_json::json!({
-        "source": feed_source(),
-        "at": crate::api::json::now(),
-        "items": items.iter().take(60).collect::<Vec<_>>(),
-    });
-    store::kv_set("home_cache", &v.to_string());
+fn save_home(source: &str, items: &[Item], continuation: &Option<String>) {
+    let saved = serde_json::json!({ "source": source, "items": items, "continuation": continuation });
+    store::kv_set("home_cache", &saved.to_string());
 }
 
 /// The "Recently uploaded" chip (after All and the Explore categories).
@@ -151,9 +141,6 @@ fn recently_uploaded() -> anyhow::Result<Vec<Item>> {
         .collect())
 }
 
-/// Only the first home load of a session starts from the cache.
-static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 pub struct HomePage {
     chip: usize,
     items: Load<Vec<Item>>,
@@ -161,54 +148,47 @@ pub struct HomePage {
     loading_more: bool,
     scroll: ScrollHandle,
     serial: u64,
+    source: String,
 }
 
 impl HomePage {
-    pub fn new(chip: usize, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut s = Self { chip, items: Load::Loading, continuation: None, loading_more: false, scroll: ScrollHandle::new(), serial: 0 };
-        s.load(cx);
+    pub fn new(chip: usize, refresh: bool, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut s = Self { chip, items: Load::Loading, continuation: None, loading_more: false, scroll: ScrollHandle::new(), serial: 0, source: String::new() };
+        s.load(refresh, cx);
         s
     }
 
-    fn load(&mut self, cx: &mut Context<Self>) {
-        // Preserve mode: keep the current feed and only take the fresh feed's
-        // continuation, so scrolling can still append new videos. Auto keeps the
-        // feed too, but a manual refresh or an app start reloads it.
-        let mode = store::settings_snapshot().home_preserve.clone();
-        let pin = cx.global::<crate::ui::app::UiState>().preserve_home;
-        let preserving = self.chip == 0
-            && match mode.as_str() {
-                "off" => false,
-                "auto" => true,
-                _ => pin,
-            };
-        let snapshot = preserving.then(|| PRESERVED.lock().clone()).flatten();
-        let mut keep_feed = snapshot.is_some();
-        self.items = match snapshot {
-            Some(items) => Load::Ready(items),
-            None => Load::Loading,
-        };
+    fn load(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        let settings = store::settings_snapshot();
+        self.source = feed_source();
+        self.items = Load::Loading;
         self.continuation = None;
+        self.loading_more = false;
         self.serial += 1;
         let serial = self.serial;
         let chip = self.chip;
-        // at startup, show the last feed right away instead of a spinner
-        let mut from_cache = false;
-        if !keep_feed && chip == 0 && !STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            if let Some(items) = cached_home() {
-                // only the pin keeps the startup cache; auto reloads at app start
-                if preserving && mode == "pin" {
-                    *PRESERVED.lock() = Some(items.clone());
-                    keep_feed = true;
-                }
-                self.items = Load::Ready(items);
-                from_cache = true;
+        if chip == 0 {
+            let raw = store::kv_get("home_cache");
+            if let Some(saved) = restore_home(raw.as_deref(), &self.source, settings.home_preserve != "off", refresh) {
+                self.items = Load::Ready(saved.items);
+                self.continuation = saved.continuation;
+                cx.notify();
+                return;
+            }
+            if refresh {
+                crate::recommend::clear_cache();
             }
         }
+        let native = settings.home_recommendations == "native";
         cx.spawn(async move |this, cx| {
             let res = blocking(move || -> anyhow::Result<(Vec<Item>, Option<String>)> {
+                if chip == 0 && native {
+                    anyhow::ensure!(crate::api::web::connected(), "Native Home needs browser sign-in. Connect your YouTube account in Settings, then press Refresh.");
+                    let p = crate::api::web::home()?;
+                    return Ok((p.items, p.continuation.map(|c| format!("{WEB}{c}"))));
+                }
                 if chip == 0 && crate::api::web::connected() {
-                    // the account's home feed exactly as youtube.com builds it
+                    // Shuffled Home uses the browser feed first, then the existing fallbacks.
                     for _ in 0..2 {
                         match crate::api::web::home() {
                             Ok(p) if !p.items.is_empty() => return Ok((freshen(p.items), p.continuation.map(|c| format!("{WEB}{c}")))),
@@ -307,33 +287,14 @@ impl HomePage {
                     return;
                 }
                 crate::perf::mark("home feed fetched");
-                // preserve mode: the fetched feed only supplies the continuation;
-                // what is on screen stays, and a failed fetch does not clear it
-                let keeping = chip == 0
-                    && keep_feed
-                    && match mode.as_str() {
-                        "off" => false,
-                        "auto" => true,
-                        _ => cx.global::<crate::ui::app::UiState>().preserve_home,
-                    };
                 match res {
                     Ok((items, cont)) => {
-                        if chip == 0 && !items.is_empty() && !keeping {
-                            save_home(&items);
-                        }
-                        // the cached feed stays if the user is already scrolling through it
-                        let scrolled = this.scroll.offset().y < px(-40.);
-                        if !keeping && !(from_cache && scrolled) {
-                            this.items = Load::Ready(items);
-                        }
-                        this.continuation = cont;
                         if chip == 0 {
-                            if let Some(v) = this.items.ready() {
-                                *PRESERVED.lock() = Some(v.clone());
-                            }
+                            save_home(&this.source, &items, &cont);
                         }
+                        this.items = Load::Ready(items);
+                        this.continuation = cont;
                     }
-                    Err(_) if from_cache || keeping => {}
                     Err(e) => this.items = Load::Error(e.to_string()),
                 }
                 cx.notify();
@@ -348,6 +309,7 @@ impl HomePage {
             self.loading_more = false;
             return;
         };
+        let serial = self.serial;
         cx.spawn(async move |this, cx| {
             let res = blocking(move || {
                 if let Some(t) = tok.strip_prefix(WEB) {
@@ -366,22 +328,25 @@ impl HomePage {
             })
             .await;
             let _ = this.update(cx, |this, cx| {
+                if this.serial != serial {
+                    return;
+                }
                 this.loading_more = false;
                 if let Ok(p) = res {
                     if let Some(items) = this.items.ready_mut() {
-                        // in preserve mode the continuation can come from a fresh
-                        // feed, so only append videos not already shown
+                        // YouTube can repeat a video across continuation pages.
                         append_new(items, p.items);
                     }
                     this.continuation = p.continuation;
-                    // keep the grown feed for the next reload in preserve mode
-                    if this.chip == 0 {
-                        if let Some(v) = this.items.ready() {
-                            *PRESERVED.lock() = Some(v.clone());
-                        }
-                    }
                 } else {
                     this.continuation = None;
+                    toast(cx, "Could not load more videos. Press Refresh to request a new feed.");
+                }
+                // Keep the complete feed, including exhausted or failed continuations, across restarts.
+                if this.chip == 0 {
+                    if let Some(v) = this.items.ready() {
+                        save_home(&this.source, v, &this.continuation);
+                    }
                 }
                 cx.notify();
             });
@@ -401,7 +366,7 @@ impl Render for HomePage {
         let mut chips = div().flex().gap_3().py_3().px_6().bg(p.bg).child(
             chip(
                 "chip-all",
-                if crate::api::auth::signed_in() || crate::api::web::connected() || !store::subscriptions().is_empty() {
+                if s.home_recommendations == "native" || crate::api::auth::signed_in() || crate::api::web::connected() || !store::subscriptions().is_empty() {
                     "All"
                 } else if crate::recommend::available() {
                     "For you"
@@ -413,19 +378,19 @@ impl Render for HomePage {
             )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.chip = 0;
-                    this.load(cx);
+                    this.load(false, cx);
                 })),
         );
         chips = chips.child(chip("chip-recent", "Recently uploaded", self.chip == RECENT, cx).on_click(cx.listener(|this, _, _, cx| {
             this.chip = RECENT;
-            this.load(cx);
+            this.load(false, cx);
         })));
         if !s.hide_explore {
             for (i, (name, _)) in EXPLORE.iter().enumerate() {
                 chips = chips.child(chip(SharedString::from(format!("chip-{i}")), *name, self.chip == i + 1, cx).on_click(cx.listener(
                     move |this, _, _, cx| {
                         this.chip = i + 1;
-                        this.load(cx);
+                        this.load(false, cx);
                     },
                 )));
             }
@@ -481,7 +446,7 @@ impl Render for HomePage {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_new, Item};
+    use super::{append_new, restore_home, Item, SavedHome};
     use crate::api::types::VideoItem;
 
     fn video(id: &str) -> Item {
@@ -500,5 +465,31 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn preserved_home_restores_all_pages_in_order_and_their_continuation() {
+        let saved = SavedHome {
+            source: "browser-account-native".into(),
+            items: (0..85).map(|i| video(&i.to_string())).collect(),
+            continuation: Some("web:next-page".into()),
+        };
+        let raw = serde_json::to_string(&saved).unwrap();
+        let restored = restore_home(Some(&raw), &saved.source, true, false).unwrap();
+        let ids: Vec<_> = restored.items.iter().filter_map(|i| i.as_video().map(|v| v.id.clone())).collect();
+        assert_eq!(ids, (0..85).map(|i| i.to_string()).collect::<Vec<_>>());
+        assert_eq!(restored.continuation, saved.continuation);
+        assert!(restore_home(Some(&raw), &saved.source, true, true).is_none(), "Refresh must bypass the saved feed");
+        assert!(restore_home(Some(&raw), &saved.source, false, false).is_none(), "Preservation can be disabled");
+        assert!(restore_home(Some(&raw), "different-account", true, false).is_none());
+        assert!(restore_home(Some("invalid json"), &saved.source, true, false).is_none());
+    }
+
+    #[test]
+    fn empty_preserved_home_does_not_trigger_another_fetch() {
+        let raw = r#"{"source":"native","items":[],"continuation":null}"#;
+        let restored = restore_home(Some(raw), "native", true, false).unwrap();
+        assert!(restored.items.is_empty());
+        assert!(restored.continuation.is_none());
     }
 }

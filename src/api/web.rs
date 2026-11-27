@@ -171,6 +171,50 @@ pub fn web_call(endpoint: &str, mut body: Value) -> Result<Value> {
     Ok(v)
 }
 
+/// One entry from the YouTube notification menu.
+pub struct YtNotification {
+    pub title: String,
+    pub time: String,
+    pub video_id: Option<String>,
+    pub channel_id: Option<String>,
+}
+
+/// The signed-in account's notifications, as the youtube.com bell shows them.
+/// Needs the browser web session; the TV session cannot reach this endpoint.
+pub fn notifications() -> Result<Vec<YtNotification>> {
+    let r = web_call("notification/get_notification_menu", json!({}))?;
+    let mut raw = Vec::new();
+    crate::api::json::find_all(&r, "notificationRenderer", &mut raw);
+    if raw.is_empty() {
+        crate::api::json::find_all(&r, "videoRenderer", &mut raw);
+    }
+    let mut out = Vec::new();
+    for n in raw {
+        let title = n
+            .get("shortMessage")
+            .map(crate::api::json::text)
+            .filter(|s| !s.is_empty())
+            .or_else(|| n.get("message").map(crate::api::json::text).filter(|s| !s.is_empty()))
+            .or_else(|| n.get("title").map(crate::api::json::text).filter(|s| !s.is_empty()))
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        let time = n
+            .get("sentTimeText")
+            .map(crate::api::json::text)
+            .or_else(|| n.get("publishedTimeText").map(crate::api::json::text))
+            .unwrap_or_default();
+        let video_id = crate::api::json::s(n, "/navigationEndpoint/watchEndpoint/videoId")
+            .or_else(|| crate::api::json::s(n, "/videoId"))
+            .or_else(|| crate::api::json::s(n, "/navigationEndpoint/notificationVideoEndpoint/videoId"));
+        let channel_id = crate::api::json::s(n, "/navigationEndpoint/browseEndpoint/browseId")
+            .or_else(|| crate::api::json::s(n, "/navigationEndpoint/watchEndpoint/channelId"));
+        out.push(YtNotification { title, time, video_id, channel_id });
+    }
+    Ok(out)
+}
+
 fn fetch_account_name() -> Result<String> {
     let r = web_call("account/account_menu", json!({}))?;
     let header = crate::api::json::find(&r, "activeAccountHeaderRenderer").ok_or_else(|| anyhow!("not signed in"))?;

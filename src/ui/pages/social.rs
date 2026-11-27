@@ -3,10 +3,19 @@
 use crate::room;
 use crate::ui::*;
 use gpui_kit::component::input::{Input, InputState};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Asks the next Social page build to open on Messages (paper-plane button).
+static DM_REQUEST: AtomicU8 = AtomicU8::new(0);
+
+pub fn request_dms() {
+    DM_REQUEST.store(1, Ordering::SeqCst);
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum SocialTab {
     Home,
+    Messages,
     Settings,
 }
 
@@ -16,6 +25,8 @@ pub struct SocialPage {
     name: Entity<InputState>,
     add_id: Entity<InputState>,
     add_name: Entity<InputState>,
+    dm_input: Entity<InputState>,
+    dm_to: Option<String>,
     show_codes: bool,
     tab: SocialTab,
 }
@@ -40,7 +51,10 @@ impl SocialPage {
         });
         let add_id = cx.new(|cx| InputState::new(window, cx).placeholder("friend code"));
         let add_name = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
-        Self { relay, token, name, add_id, add_name, show_codes: false, tab: SocialTab::Home }
+        let dm_input = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
+        let tab = if DM_REQUEST.swap(0, Ordering::SeqCst) == 1 { SocialTab::Messages } else { SocialTab::Home };
+        let dm_to = (tab == SocialTab::Messages).then(|| snap.cfg.friends.first().map(|f| f.id.clone())).flatten();
+        Self { relay, token, name, add_id, add_name, dm_input, dm_to, show_codes: false, tab }
     }
 }
 
@@ -92,6 +106,11 @@ fn dot(online: bool, p: Pal) -> Div {
         .size(px(8.))
         .rounded_full()
         .bg(if online { Hsla::from(rgb(0x2ba640)) } else { p.text3 })
+}
+
+fn clock(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    format!("{}:{:02}", s / 60, s % 60)
 }
 
 fn activity_row(a: &room::Activity, p: Pal, cx: &mut App) -> AnyElement {
@@ -436,12 +455,206 @@ impl Render for SocialPage {
                 };
                 content = content.child(header).child(feeds);
             }
+            SocialTab::Messages => {
+                let me = snap.cfg.me.clone();
+                let friends = snap.cfg.friends.clone();
+                let dms = snap.dms.clone();
+                let online = snap.online.clone();
+                if self.dm_to.is_none() {
+                    self.dm_to = friends.first().map(|f| f.id.clone());
+                }
+                // reactions grouped under the message they belong to
+                let mut reactions: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                for d in dms.iter().filter(|d| !d.react_to.is_empty()) {
+                    reactions.entry(d.react_to.clone()).or_default().push(d.emoji.clone());
+                }
+
+                let mut list = card(p).child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child("Messages"));
+                if friends.is_empty() {
+                    list = list.child(div().text_sm().text_color(p.text3).child("Add a friend in Settings to send videos."));
+                }
+                let mut ordered = friends.clone();
+                ordered.sort_by_key(|f| room::conversation(&dms, &me, &f.id).last().map(|d| d.at).unwrap_or(0));
+                ordered.reverse();
+                for f in &ordered {
+                    let fid = f.id.clone();
+                    let conv = room::conversation(&dms, &me, &fid);
+                    let preview = conv
+                        .last()
+                        .map(|d| {
+                            if !d.react_to.is_empty() {
+                                format!("Reacted {}", d.emoji)
+                            } else if d.video.is_some() && d.text.is_empty() {
+                                "Shared a video".into()
+                            } else {
+                                d.text.clone()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let selected = self.dm_to.as_deref() == Some(&fid);
+                    let is_online = online.iter().any(|x| x == &fid);
+                    list = list.child(
+                        div()
+                            .id(SharedString::from(format!("dm-thread-{fid}")))
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .p_2()
+                            .rounded_lg()
+                            .cursor_pointer()
+                            .when(selected, |d| d.bg(p.chip))
+                            .hover(move |s| s.bg(p.hover))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.dm_to = Some(fid.clone());
+                                room::mark_dms_read(cx);
+                                cx.notify();
+                            }))
+                            .child(dot(is_online, p))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(div().text_sm().text_color(p.text).truncate().child(f.name.clone()))
+                                    .child(div().text_xs().text_color(p.text3).truncate().child(preview.clone())),
+                            ),
+                    );
+                }
+
+                let mut thread = card(p);
+                if let Some(fid) = self.dm_to.clone() {
+                    let fname = friends
+                        .iter()
+                        .find(|f| f.id == fid)
+                        .map(|f| f.name.clone())
+                        .unwrap_or_else(|| fid.chars().take(8).collect());
+                    thread = thread.child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(fname));
+                    let conv = room::conversation(&dms, &me, &fid);
+                    if conv.is_empty() {
+                        thread = thread.child(div().text_sm().text_color(p.text3).child("No messages yet."));
+                    }
+                    for d in conv.iter().filter(|d| d.react_to.is_empty()) {
+                        let mine = d.from == me;
+                        let mut bubble =
+                            div().flex().flex_col().gap_1().max_w(px(520.)).p_3().rounded_xl().bg(if mine { p.accent.opacity(0.16) } else { p.chip });
+                        if let Some(v) = &d.video {
+                            let (vid, start) = (v.id.clone(), d.pos);
+                            let title = if v.title.is_empty() { v.id.clone() } else { v.title.clone() };
+                            bubble = bubble.child(
+                                div()
+                                    .id(SharedString::from(format!("dm-video-{}", d.id)))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        crate::ui::app::navigate(
+                                            crate::ui::app::Route::Watch { id: vid.clone(), playlist: None, start: Some(start) },
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                                    .child(img(SharedString::from(v.thumbnail.clone())).w(px(120.)).h(px(68.)).rounded_md().object_fit(ObjectFit::Cover))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .min_w_0()
+                                            .child(div().text_sm().text_color(p.text).line_clamp(2).child(title))
+                                            .child(div().text_xs().text_color(p.accent).child(format!("▶ {}", clock(start)))),
+                                    ),
+                            );
+                        }
+                        if !d.text.is_empty() {
+                            bubble = bubble.child(div().text_sm().text_color(p.text).child(d.text.clone()));
+                        }
+                        if let Some(emojis) = reactions.get(&d.id) {
+                            let mut row = div().flex().flex_wrap().gap_1();
+                            for e in emojis {
+                                row = row.child(div().text_xs().px_2().py_0p5().rounded_full().bg(p.bg).child(e.clone()));
+                            }
+                            bubble = bubble.child(row);
+                        }
+                        let target = d.id.clone();
+                        let mut reacts = div().flex().gap_1();
+                        for e in ["👍", "❤️", "😂", "🔥"] {
+                            let t = target.clone();
+                            let em = e.to_string();
+                            reacts = reacts.child(
+                                div()
+                                    .id(SharedString::from(format!("dm-react-{}-{e}", target)))
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .hover(move |s| s.opacity(0.7))
+                                    .on_click(cx.listener(move |_, _, _, cx| room::react_dm(t.clone(), em.clone(), cx)))
+                                    .child(e),
+                            );
+                        }
+                        bubble = bubble.child(reacts);
+                        thread = thread.child(div().flex().w_full().when(mine, |d| d.justify_end()).child(bubble));
+                    }
+                    let to = fid.clone();
+                    thread = thread.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .mt_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(p.border)
+                                    .bg(p.bg)
+                                    .child(Input::new(&self.dm_input).appearance(false)),
+                            )
+                            .child(icon_button("dm-send", "send", cx).on_click(cx.listener(move |this, _, window, cx| {
+                                let text = this.dm_input.read(cx).value().trim().to_string();
+                                if text.is_empty() {
+                                    return;
+                                }
+                                room::send_dm(to.clone(), text, None, 0.0, cx);
+                                this.dm_input.update(cx, |i, cx| i.set_value("", window, cx));
+                                cx.notify();
+                            }))),
+                    );
+                } else {
+                    thread = thread.child(div().text_sm().text_color(p.text3).child("Select a friend."));
+                }
+
+                let ui = *cx.global::<crate::ui::app::UiState>();
+                let wide = (ui.viewport.width - px(280.)) > px(900.);
+                let body: AnyElement = if wide {
+                    div()
+                        .flex()
+                        .gap_4()
+                        .items_start()
+                        .child(div().w(px(260.)).flex_none().child(list))
+                        .child(div().flex_1().min_w_0().child(thread))
+                        .into_any_element()
+                } else {
+                    div().flex().flex_col().gap_4().child(list).child(thread).into_any_element()
+                };
+                content = content.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().text_xl().font_weight(FontWeight::BOLD).text_color(p.text).child("Messages"))
+                        .child(body),
+                );
+            }
             SocialTab::Settings => {
                 content = content.child(conn).child(friends);
             }
         }
 
         let tab_home_active = self.tab == SocialTab::Home;
+        let tab_messages_active = self.tab == SocialTab::Messages;
         let tab_settings_active = self.tab == SocialTab::Settings;
         let bar = div()
             .flex()
@@ -453,6 +666,16 @@ impl Render for SocialPage {
                         this.tab = SocialTab::Home;
                         cx.notify();
                     })),
+            )
+            .child(
+                tab_pill("social-tab-messages", "Messages", tab_messages_active, true, p).on_click(cx.listener(|this, _, _, cx| {
+                    this.tab = SocialTab::Messages;
+                    if this.dm_to.is_none() {
+                        this.dm_to = room::snapshot(cx).cfg.friends.first().map(|f| f.id.clone());
+                    }
+                    room::mark_dms_read(cx);
+                    cx.notify();
+                })),
             )
             .when(in_room, |d| {
                 d.child(

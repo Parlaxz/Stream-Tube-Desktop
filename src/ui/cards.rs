@@ -202,10 +202,7 @@ pub fn thumbnail(v: &VideoItem, url: String, w: Pixels, h: Pixels, radius: Pixel
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
-                            if let Some(wl) = store::playlists().into_iter().find(|p| p.protected && p.name == "Watch later") {
-                                store::playlist_add(wl.id, &save);
-                                toast(cx, "Saved to Watch later");
-                            }
+                            crate::ui::app::save_to_watch_later(save.clone(), cx);
                         }),
                 )
                 .child(
@@ -287,10 +284,7 @@ pub fn video_menu_items(v: &VideoItem) -> Vec<MenuItem> {
     }));
     let v2 = v.clone();
     items.push(MenuItem::new("clock", t("Save to Watch later"), move |_, cx| {
-        if let Some(wl) = store::playlists().into_iter().find(|p| p.protected && p.name == "Watch later") {
-            store::playlist_add(wl.id, &v2);
-            toast(cx, t("Saved to Watch later"));
-        }
+        crate::ui::app::save_to_watch_later(v2.clone(), cx);
     }));
     let v3 = v.clone();
     items.push(MenuItem::new("bookmark", t("Save to playlist…"), move |window, cx| {

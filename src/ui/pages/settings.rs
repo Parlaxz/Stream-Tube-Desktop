@@ -615,22 +615,27 @@ impl SettingsPage {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(p.text)
-                            .child("Home Page preservation"),
+                            .child(t("Home page activity")),
                     )
                     .child(row(
-                        "Mode",
-                        "Pin button: the top-bar pin decides. On hard refresh and close: kept until a manual refresh or an app restart. Off: reload with the page.",
+                        "Recommendations",
+                        "Native Home uses your browser sign-in and YouTube's order. Shuffled Home mixes the feed as before. Press Refresh on Home to apply changes. Your content filters still apply.",
                         self.choice(
-                            "home-preserve",
+                            "home-recommendations",
                             &[
-                                ("pin".to_string(), "Pin button"),
-                                ("auto".to_string(), "On hard refresh and close"),
-                                ("off".to_string(), "Off"),
+                                ("native".to_string(), "Native Home"),
+                                ("shuffled".to_string(), "Shuffled Home"),
                             ],
-                            s.home_preserve.clone(),
-                            |s, v| s.home_preserve = v,
+                            s.home_recommendations.clone(),
+                            |s, v| s.home_recommendations = v,
                             cx,
                         ),
+                        cx,
+                    ))
+                    .child(row(
+                        "Keep Home until Refresh",
+                        "Keep the same videos and order, even after you close the app. Only Refresh requests a replacement feed. Scrolling can load more videos.",
+                        switch("home-preserve", s.home_preserve != "off", |s, v| s.home_preserve = if v { "auto" } else { "off" }.into(), cx),
                         cx,
                     )),
             )

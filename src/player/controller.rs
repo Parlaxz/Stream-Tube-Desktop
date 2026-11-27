@@ -457,6 +457,7 @@ impl Player {
                 self.loading = false;
                 self.eof = false;
                 self.apply_caption();
+                crate::media_session::set_playing(!self.paused);
                 cx.emit(PlayerEvent::Loaded);
                 cx.notify();
             }
@@ -758,6 +759,7 @@ impl Player {
     pub fn play(&mut self, video: VideoItem, start: Option<f64>, cx: &mut Context<Self>) {
         let me = cx.entity();
         pause_others(me, cx);
+        crate::media_session::now_playing(&video.title, &video.channel_name, false);
         self.playback_timing = std::env::var_os("STREAMTUBE_PLAYBACK_TIMING").map(|_| ("open", Instant::now()));
         self.keyboard_feedback = None;
         self.preloaded_until = 0.0;
@@ -1342,6 +1344,9 @@ impl Player {
         if p {
             self.save_progress(true);
         }
+        if self.video.is_some() {
+            crate::media_session::set_playing(!p);
+        }
         self.sync_idle(cx);
     }
 
@@ -1547,6 +1552,7 @@ impl Player {
         self.loading = false;
         self.queue.clear();
         self.queue_pos = None;
+        crate::media_session::clear();
         if let Some(old) = self.frame.take() {
             cx.drop_image(old, None);
         }

@@ -11,28 +11,71 @@
 //! Run:   `relay.exe --port 8930 --token <secret>`
 //! Check: `relay.exe --selftest`
 //!
-//! Client -> relay:  HELLO <token> <id> | TO <id> <json> | JOIN <room> |
-//!                   LEAVE <room> | ROOM <room> <json> | WHO <id,id,..> | PING
+//! Client -> relay:  HELLO <token> <id> | TO <id> <json> | DM <id> <json> |
+//!                   JOIN <room> | LEAVE <room> | ROOM <room> <json> |
+//!                   WHO <id,id,..> | PING
 //! Relay -> client:  WELCOME <id> | FROM <id> <json> | ROOM <id> <json> |
 //!                   ONLINE <id,id,..> | PONG | ERROR <text>
+//!
+//! DMs are the one thing the relay stores. `DM` appends `to<TAB>from<TAB>json`
+//! to a tab-separated file and forwards it. On HELLO both sides' stored DMs are
+//! replayed, so an offline friend still gets the message.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 type Writer = Arc<Mutex<TcpStream>>;
 
+struct Dm {
+    to: String,
+    from: String,
+    payload: String,
+}
+
 struct Hub {
     token: String,
     clients: Mutex<HashMap<String, Writer>>,
     rooms: Mutex<HashMap<String, HashSet<String>>>,
+    /// Stored DMs. The file is append-only; the vector is the in-memory copy.
+    dms: Mutex<Vec<Dm>>,
+    dm_file: Option<PathBuf>,
 }
 
 impl Hub {
-    fn new(token: String) -> Self {
-        Self { token, clients: Mutex::new(HashMap::new()), rooms: Mutex::new(HashMap::new()) }
+    fn new(token: String, dm_file: Option<PathBuf>) -> Self {
+        let dms = dm_file.as_deref().map(load_dms).unwrap_or_default();
+        Self {
+            token,
+            clients: Mutex::new(HashMap::new()),
+            rooms: Mutex::new(HashMap::new()),
+            dms: Mutex::new(dms),
+            dm_file,
+        }
+    }
+
+    /// Stores a DM and tries to deliver it now. The recipient gets it from the
+    /// replay on its next HELLO if it is offline.
+    fn store_dm(&self, to: &str, from: &str, payload: &str) {
+        if let Some(path) = &self.dm_file {
+            let line = format!("{to}\t{from}\t{payload}\n");
+            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+        self.dms.lock().unwrap().push(Dm { to: to.to_string(), from: from.to_string(), payload: payload.to_string() });
+    }
+
+    /// Sends every stored DM that involves `id` to `id`, oldest first.
+    fn replay_dms(&self, id: &str) {
+        let dms = self.dms.lock().unwrap();
+        for d in dms.iter().filter(|d| d.to == id || d.from == id) {
+            self.send(id, &format!("FROM {} {}", d.from, d.payload));
+        }
     }
 
     fn send(&self, id: &str, line: &str) -> bool {
@@ -69,6 +112,18 @@ impl Hub {
             set.remove(id);
         }
     }
+}
+
+fn load_dms(path: &Path) -> Vec<Dm> {
+    let Ok(f) = std::fs::File::open(path) else { return Vec::new() };
+    BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| {
+            let mut it = line.splitn(3, '\t');
+            Some(Dm { to: it.next()?.to_string(), from: it.next()?.to_string(), payload: it.next()?.to_string() })
+        })
+        .collect()
 }
 
 fn write_line(w: &Writer, line: &str) -> bool {
@@ -116,13 +171,25 @@ fn handle(hub: &Hub, w: &Writer, me: &mut Option<String>, line: &str) -> bool {
             }
             hub.clients.lock().unwrap().insert(id.to_string(), w.clone());
             *me = Some(id.to_string());
-            write_line(w, &format!("WELCOME {id}"))
+            write_line(w, &format!("WELCOME {id}"));
+            hub.replay_dms(id);
+            true
         }
         "TO" => {
             let Some(from) = me.clone() else { return false };
             let to = it.next().unwrap_or("");
             let payload = it.next().unwrap_or("");
             hub.send(to, &format!("FROM {from} {payload}"));
+            true
+        }
+        "DM" => {
+            let Some(from) = me.clone() else { return false };
+            let to = it.next().unwrap_or("");
+            let payload = it.next().unwrap_or("");
+            if !to.is_empty() && !payload.is_empty() {
+                hub.store_dm(to, &from, payload);
+                hub.send(to, &format!("FROM {from} {payload}"));
+            }
             true
         }
         "JOIN" => {
@@ -167,16 +234,17 @@ fn main() {
         std::process::exit(selftest());
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: relay [--port 8930] [--token <secret>] [--bind 0.0.0.0] [--selftest]");
+        println!("usage: relay [--port 8930] [--token <secret>] [--bind 0.0.0.0] [--data relay_dms.tsv] [--selftest]");
         return;
     }
     let port: u16 = arg_value(&args, "--port", "8930").parse().unwrap_or(8930);
     let bind = arg_value(&args, "--bind", "0.0.0.0");
     let token = arg_value(&args, "--token", "");
+    let data = arg_value(&args, "--data", "relay_dms.tsv");
     if token.is_empty() {
         eprintln!("warning: no --token given, anyone who finds the port can connect");
     }
-    let hub = Arc::new(Hub::new(token));
+    let hub = Arc::new(Hub::new(token, Some(PathBuf::from(data))));
     let listener = match TcpListener::bind((bind.as_str(), port)) {
         Ok(l) => l,
         Err(e) => {
@@ -222,7 +290,7 @@ fn selftest() -> i32 {
         }
     };
     let port = listener.local_addr().unwrap().port();
-    let hub = Arc::new(Hub::new("t".to_string()));
+    let hub = Arc::new(Hub::new("t".to_string(), None));
     {
         let hub = hub.clone();
         std::thread::spawn(move || {
@@ -260,6 +328,13 @@ fn selftest() -> i32 {
     send(&c, "HELLO wrong eve");
     expect(&mut cr, "ERROR bad token");
 
-    println!("selftest PASS: hello, unicast, rooms, presence and token check");
+    // A DM to an offline friend is stored and replayed on their next HELLO.
+    send(&a, "DM carol {\"t\":\"dm\",\"dm_id\":\"m1\"}");
+    let (d, mut dr) = client(port);
+    send(&d, "HELLO t carol");
+    expect(&mut dr, "WELCOME carol");
+    expect(&mut dr, "FROM alice {\"t\":\"dm\",\"dm_id\":\"m1\"}");
+
+    println!("selftest PASS: hello, unicast, rooms, presence, token check and DM replay");
     0
 }

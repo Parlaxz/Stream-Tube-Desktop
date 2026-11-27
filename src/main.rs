@@ -9,6 +9,7 @@ mod idle_inhibit;
 mod import;
 mod links;
 mod locale;
+mod media_session;
 mod perf;
 mod player;
 mod recommend;

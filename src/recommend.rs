@@ -16,6 +16,10 @@ const KEEP: Duration = Duration::from_secs(20 * 60);
 
 static CACHE: Mutex<Option<(Vec<Item>, Instant, u64)>> = Mutex::new(None);
 
+pub fn clear_cache() {
+    *CACHE.lock() = None;
+}
+
 /// Whether there's anything to base recommendations on.
 pub fn available() -> bool {
     crate::store::settings_snapshot().history_enabled && !crate::store::history_list("", 1).is_empty()

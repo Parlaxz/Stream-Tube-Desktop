@@ -839,8 +839,9 @@ impl WatchPage {
                                 for f in crate::room::snapshot(cx).cfg.friends.into_iter().take(12) {
                                     let (id, name) = (f.id.clone(), f.name.clone());
                                     let video = video.clone();
-                                    items.push(crate::ui::app::MenuItem::new("users", format!("Send to {name}"), move |_, cx| {
-                                        crate::room::share_to(id.clone(), video.clone(), cx)
+                                    items.push(crate::ui::app::MenuItem::new("users", format!("Send to {name}"), move |window, cx| {
+                                        let at = crate::player::controller::player(cx).read(cx).time;
+                                        crate::ui::app::open_send_video(video.clone(), id.clone(), name.clone(), at, window, cx);
                                     }));
                                 }
                                 crate::ui::app::open_menu(ev.position(), items, window, cx);

@@ -105,6 +105,8 @@ pub struct PlayerView {
     /// left button held on the video; after a moment it plays at 2x
     press: Option<Instant>,
     press_boosted: bool,
+    /// back/forward button held: the token the repeat task checks to stop
+    nav_hold: Option<Instant>,
     /// picture-in-picture: where a left press on the video started; moving
     /// from there drags the whole window, like a browser's PiP
     pip_press: Option<Point<Pixels>>,
@@ -156,6 +158,7 @@ impl PlayerView {
             last_click: None,
             press: None,
             press_boosted: false,
+            nav_hold: None,
             pip_press: None,
             pip_moved: false,
             pip_move_echo: false,
@@ -217,13 +220,45 @@ impl PlayerView {
         }
     }
 
-    /// Mouse buttons 4 (back) and 5 (forward) seek like the Left/Right keys.
+    /// Mouse button 4 (back) / 5 (forward) seek like the Left/Right keys and
+    /// keep seeking while held (Windows does not auto-repeat XBUTTONs).
     /// Only the main player takes them; the mini player leaves app back/forward.
     fn seek_with_back_forward(&mut self, forward: bool, cx: &mut Context<Self>) {
         if self.mini || self.pip || self.player.read(cx).video.is_none() {
             return;
         }
         cx.stop_propagation();
+        let token = Instant::now();
+        self.nav_hold = Some(token);
+        self.seek_step_once(forward, cx);
+        self.poke(cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(400)).await;
+            loop {
+                let alive = match this.update(cx, |v, cx| {
+                    if v.nav_hold != Some(token) {
+                        return false;
+                    }
+                    if v.player.read(cx).video.is_none() {
+                        v.nav_hold = None;
+                        return false;
+                    }
+                    v.seek_step_once(forward, cx);
+                    true
+                }) {
+                    Ok(alive) => alive,
+                    Err(_) => break,
+                };
+                if !alive {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_millis(60)).await;
+            }
+        })
+        .detach();
+    }
+
+    fn seek_step_once(&mut self, forward: bool, cx: &mut Context<Self>) {
         let step = store::settings_snapshot().seek_step;
         self.player.update(cx, |pl, cx| {
             let before = pl.time;
@@ -231,7 +266,10 @@ impl PlayerView {
             pl.show_keyboard_feedback(KeyboardFeedback::Seek(pl.time - before), cx);
             cx.notify();
         });
-        self.poke(cx);
+    }
+
+    fn stop_nav_hold(&mut self) {
+        self.nav_hold = None;
     }
 }
 
@@ -443,6 +481,7 @@ impl Render for PlayerView {
                 if !*h {
                     this.hover_frac = None;
                     this.finish_pointer_press(cx);
+                    this.stop_nav_hold();
                 }
                 cx.notify();
             }))
@@ -451,6 +490,9 @@ impl Render for PlayerView {
                 if ev.pressed_button != Some(MouseButton::Left) {
                     this.finish_pointer_press(cx);
                     this.pip_press = None;
+                }
+                if this.nav_hold.is_some() && !matches!(ev.pressed_button, Some(MouseButton::Navigate(_))) {
+                    this.stop_nav_hold();
                 }
                 // PiP: dragging the picture moves the window
                 if let Some(origin) = this.pip_press.filter(|_| this.drag_seek.is_none() && !this.drag_vol) {
@@ -518,6 +560,22 @@ impl Render for PlayerView {
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|this, _: &MouseDownEvent, _, cx| this.seek_with_back_forward(true, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.stop_nav_hold()),
+            )
+            .on_mouse_up(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.stop_nav_hold()),
+            )
+            .on_mouse_up_out(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.stop_nav_hold()),
+            )
+            .on_mouse_up_out(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.stop_nav_hold()),
             )
             .child(volume_layer)
             .child(surface);
