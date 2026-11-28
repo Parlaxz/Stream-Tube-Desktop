@@ -1779,6 +1779,20 @@ impl AppView {
         }
     }
 
+    /// Shows the Social tab on Messages. Called from AppView's own listeners,
+    /// which already hold this entity: never go through `open_social_inbox`,
+    /// whose `app.update` would re-enter the lease and panic.
+    fn open_social_inbox_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::ui::pages::social::request_dms();
+        self.open_social_tab(window, cx);
+        if matches!(&self.route, Route::Social) {
+            crate::ui::pages::social::request_dms();
+            crate::ui::slot::clear_slot(cx);
+            self.page = build_page(&Route::Social, window, cx);
+            cx.notify();
+        }
+    }
+
     /// Sidebar navigation: Ctrl/Cmd+left click or a middle click opens the
     /// target in a new tab, any other click navigates in place.
     fn nav(&mut self, route: Route, ev: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1986,8 +2000,18 @@ impl AppView {
 
     /// A short name for a tab's page.
     fn tab_label(route: &Route, title: Option<&str>, player: &Entity<Player>, cx: &App) -> String {
-        if let Some(t) = title.filter(|t| !t.is_empty()) {
-            return t.to_string();
+        // A card title is useful for videos, channels and playlists. Pages with
+        // their own fixed name must not keep a stale title from an earlier route,
+        // or a tab navigated in place shows the old name (a "Social" tab that is
+        // really Search).
+        let keeps_title = matches!(
+            route,
+            Route::Watch { .. } | Route::Channel(_) | Route::Playlist(_) | Route::LocalPlaylist(_)
+        );
+        if keeps_title {
+            if let Some(t) = title.filter(|t| !t.is_empty()) {
+                return t.to_string();
+            }
         }
         match route {
             Route::Watch { id, .. } => {
@@ -3868,9 +3892,9 @@ impl AppView {
         icon_button("dms", "send", cx)
             .relative()
             .when(unread > 0, |d| d.child(div().absolute().top_1().right_1().size(px(8.)).rounded_full().bg(p.accent)))
-            .on_click(cx.listener(|_, _, window, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
                 crate::room::mark_dms_read(cx);
-                open_social_inbox(window, cx);
+                this.open_social_inbox_tab(window, cx);
             }))
             .into_any_element()
     }
@@ -4034,7 +4058,7 @@ impl AppView {
                     .child(
                         icon_button("social", "users", cx)
                             .when(matches!(&self.route, Route::Social), |d| d.bg(p.chip))
-                            .on_click(cx.listener(|_, _, window, cx| open_social(window, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.open_social_tab(window, cx))),
                     )
                     .child(self.render_dl_button(cx))
                     .child(icon_button("settings", "settings", cx).on_click(cx.listener(|this, _, window, cx| this.open_settings_tab(window, cx))))

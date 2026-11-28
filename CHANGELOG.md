@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.1
+
+### Fixed
+
+- The top-bar Social and paper-plane buttons no longer crash the app. They updated the app from inside its own click handler, which GPUI rejects.
+- A tab navigated in place no longer keeps its old name, so Search or Shorts tabs stop showing up as extra "Social" tabs.
+
 ## 0.12.0
 
 ### Social
